@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
-import { FlowEdge, SQLNode, FlowPipeline } from '../types';
-import { X, Trash2, ArrowRight, Save, Check, GitBranch, AlertCircle } from 'lucide-react';
+import { FlowEdge, FlowPipeline } from '../types';
+import { detectCycleIfEdgeAdded } from '../utils/pipelineTopology';
+import { X, Trash2, ArrowRight, Check, GitBranch, AlertCircle, RefreshCw } from 'lucide-react';
 
 interface EdgeEditModalProps {
   edge?: FlowEdge | null;
@@ -40,13 +41,19 @@ export const EdgeEditModal: React.FC<EdgeEditModalProps> = ({
 
   if (!isOpen) return null;
 
+  // Check if this connection forms a circular dependency
+  const cycleCheck =
+    sourceId && targetId
+      ? detectCycleIfEdgeAdded(pipeline.nodes, pipeline.edges, sourceId, targetId, edge?.id)
+      : { createsCycle: false, summary: '' };
+
   const handleSave = () => {
     if (!sourceId || !targetId) {
       setError('Please select both a source step and a target step.');
       return;
     }
     if (sourceId === targetId) {
-      setError('A SQL step cannot link directly to itself.');
+      setError('A SQL step cannot link directly to itself (self-cycle loop).');
       return;
     }
 
@@ -82,7 +89,7 @@ export const EdgeEditModal: React.FC<EdgeEditModalProps> = ({
                 {edge ? 'Edit Execution Edge' : 'Create Execution Edge'}
               </h3>
               <p className="text-[11px] text-slate-500">
-                Defines the sequential order of SQL statement execution
+                Defines sequential order and dependency flow between SQL queries
               </p>
             </div>
           </div>
@@ -104,8 +111,23 @@ export const EdgeEditModal: React.FC<EdgeEditModalProps> = ({
             </div>
           )}
 
+          {/* Real-time Cycle Warning */}
+          {cycleCheck.createsCycle && (
+            <div className="p-3.5 bg-amber-50 border border-amber-200 rounded-xl text-xs text-amber-900 space-y-1.5 shadow-2xs">
+              <div className="flex items-center gap-2 font-semibold text-amber-800">
+                <RefreshCw className="w-4 h-4 text-amber-600 shrink-0 animate-spin" style={{ animationDuration: '6s' }} />
+                <span>Circular Dependency (Cycle) Detected</span>
+              </div>
+              <p className="text-[11px] text-amber-700 leading-relaxed">
+                Connecting this edge introduces a loop cycle: <span className="font-mono font-semibold">{cycleCheck.summary}</span>. In SQL execution, cyclic queries execute iteratively or recursively.
+              </p>
+            </div>
+          )}
+
           {/* Visual Step Connection Flow Preview */}
-          <div className="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-3 text-xs">
+          <div className={`p-3 rounded-xl border flex items-center justify-between gap-3 text-xs transition-colors ${
+            cycleCheck.createsCycle ? 'bg-amber-50/60 border-amber-200' : 'bg-slate-50 border-slate-200'
+          }`}>
             <div className="flex-1 min-w-0">
               <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">Source Step (Executes First)</span>
               <div className="font-semibold text-slate-800 truncate">

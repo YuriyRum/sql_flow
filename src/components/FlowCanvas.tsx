@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { FlowPipeline, SQLNode, FlowEdge, QueryType } from '../types';
 import {
   Plus,
@@ -31,10 +31,17 @@ import {
   GitBranch,
   Hand,
   Maximize,
-  Focus
+  Focus,
+  Repeat,
 } from 'lucide-react';
 import { EdgeEditModal } from './EdgeEditModal';
-import { addOrUpdateEdge, deleteEdge, recalculatePipelineOrder } from '../utils/pipelineTopology';
+import {
+  addOrUpdateEdge,
+  deleteEdge,
+  recalculatePipelineOrder,
+  analyzeGraphCycles,
+  breakAllCycles,
+} from '../utils/pipelineTopology';
 
 interface FlowCanvasProps {
   pipeline: FlowPipeline;
@@ -85,6 +92,24 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
     initialPanX: 60,
     initialPanY: 40,
   });
+
+  // Local state and ref for ultra-fast 60/120fps node dragging without pipeline re-renders
+  const [draggedNodePos, setDraggedNodePos] = useState<{ id: string; x: number; y: number } | null>(null);
+  const draggedNodePosRef = useRef<{ id: string; x: number; y: number } | null>(null);
+  const rafDragIdRef = useRef<number | null>(null);
+
+  // Keep references to latest pipeline and zoom for smooth RAF auto-panning
+  const pipelineRef = useRef(pipeline);
+  pipelineRef.current = pipeline;
+  const zoomRef = useRef(zoom);
+  zoomRef.current = zoom;
+  const panRef = useRef(pan);
+  panRef.current = pan;
+
+  // Auto-pan animation frame and velocity state while dragging
+  const autoPanVelocityRef = useRef<{ vx: number; vy: number }>({ vx: 0, vy: 0 });
+  const autoPanAnimIdRef = useRef<number | null>(null);
+  const currentCursorPosRef = useRef<{ clientX: number; clientY: number } | null>(null);
 
   // Touch gesture tracking ref (Single finger pan, 2-finger pinch/pan, node drag)
   const touchStateRef = useRef<{
@@ -159,6 +184,17 @@ export const FlowCanvas: React.FC<FlowCanvasProps> = ({
   const handleDeleteEdge = (edgeId: string) => {
     const updated = deleteEdge(pipeline, edgeId);
     onUpdatePipeline(updated);
+  };
+
+  // Compute directed graph cycle analysis
+  const cycleAnalysis = useMemo(
+    () => analyzeGraphCycles(pipeline.nodes, pipeline.edges),
+    [pipeline.nodes, pipeline.edges]
+  );
+
+  const handleBreakCycles = () => {
+    const broken = breakAllCycles(pipeline);
+    onUpdatePipeline(broken);
   };
 
   // Sorted nodes by execution order
@@ -425,6 +461,8 @@ WHERE "STATUS" = 'ACTIVE';`,
     setDraggingNodeId(node.id);
     dragStartPosRef.current = { x: e.clientX, y: e.clientY };
     dragNodeInitialPosRef.current = { x: node.position.x, y: node.position.y };
+    draggedNodePosRef.current = { id: node.id, x: node.position.x, y: node.position.y };
+    setDraggedNodePos({ id: node.id, x: node.position.x, y: node.position.y });
     isDraggingNodeRef.current = false;
     hasMovedNodeRef.current = false;
 
@@ -434,9 +472,60 @@ WHERE "STATUS" = 'ACTIVE';`,
     }
   };
 
+  // Auto-pan animation frame loop while dragging a node near canvas borders
+  useEffect(() => {
+    if (!draggingNodeId) {
+      if (autoPanAnimIdRef.current) {
+        cancelAnimationFrame(autoPanAnimIdRef.current);
+        autoPanAnimIdRef.current = null;
+      }
+      autoPanVelocityRef.current = { vx: 0, vy: 0 };
+      return;
+    }
+
+    const autoPanLoop = () => {
+      const { vx, vy } = autoPanVelocityRef.current;
+      if ((vx !== 0 || vy !== 0) && draggingNodeId && dragStartPosRef.current && dragNodeInitialPosRef.current) {
+        // Pan canvas
+        setPan((prev) => {
+          const nextPan = { x: prev.x + vx, y: prev.y + vy };
+          panRef.current = nextPan;
+          return nextPan;
+        });
+
+        // Adjust dragStartPos so node keeps pace with moving canvas
+        dragStartPosRef.current.x += vx;
+        dragStartPosRef.current.y += vy;
+
+        if (currentCursorPosRef.current) {
+          const dx = currentCursorPosRef.current.clientX - dragStartPosRef.current.x;
+          const dy = currentCursorPosRef.current.clientY - dragStartPosRef.current.y;
+          const currentZoom = zoomRef.current || 1;
+          const newX = Math.round(dragNodeInitialPosRef.current.x + dx / currentZoom);
+          const newY = Math.round(dragNodeInitialPosRef.current.y + dy / currentZoom);
+
+          draggedNodePosRef.current = { id: draggingNodeId, x: newX, y: newY };
+          setDraggedNodePos({ id: draggingNodeId, x: newX, y: newY });
+        }
+      }
+      autoPanAnimIdRef.current = requestAnimationFrame(autoPanLoop);
+    };
+
+    autoPanAnimIdRef.current = requestAnimationFrame(autoPanLoop);
+
+    return () => {
+      if (autoPanAnimIdRef.current) {
+        cancelAnimationFrame(autoPanAnimIdRef.current);
+        autoPanAnimIdRef.current = null;
+      }
+    };
+  }, [draggingNodeId]);
+
   // Global Mouse Move & Mouse Up Listeners (Handles both canvas panning and node dragging seamlessly)
   useEffect(() => {
     const handleGlobalMouseMove = (e: MouseEvent) => {
+      currentCursorPosRef.current = { clientX: e.clientX, clientY: e.clientY };
+
       // 1. Panning canvas background
       if (isPanning) {
         const dx = e.clientX - panStartRef.current.startX;
@@ -460,32 +549,79 @@ WHERE "STATUS" = 'ACTIVE';`,
 
         if (!hasMovedNodeRef.current) return;
 
-        const newX = dragNodeInitialPosRef.current.x + dx / zoom;
-        const newY = dragNodeInitialPosRef.current.y + dy / zoom;
+        // Calculate auto-pan velocity based on proximity to viewport edges
+        const container = containerRef.current;
+        if (container) {
+          const rect = container.getBoundingClientRect();
+          const margin = 70;
+          let vx = 0;
+          let vy = 0;
 
-        const updatedNodes = pipeline.nodes.map((n) =>
-          n.id === draggingNodeId
-            ? { ...n, position: { x: Math.max(10, Math.round(newX)), y: Math.max(10, Math.round(newY)) } }
-            : n
-        );
+          if (e.clientX < rect.left + margin) {
+            vx = Math.min(24, Math.max(2, (rect.left + margin - e.clientX) * 0.35));
+          } else if (e.clientX > rect.right - margin) {
+            vx = -Math.min(24, Math.max(2, (e.clientX - (rect.right - margin)) * 0.35));
+          }
 
-        onUpdatePipeline({
-          ...pipeline,
-          nodes: updatedNodes,
-        });
+          if (e.clientY < rect.top + margin) {
+            vy = Math.min(24, Math.max(2, (rect.top + margin - e.clientY) * 0.35));
+          } else if (e.clientY > rect.bottom - margin) {
+            vy = -Math.min(24, Math.max(2, (e.clientY - (rect.bottom - margin)) * 0.35));
+          }
+
+          autoPanVelocityRef.current = { vx, vy };
+        }
+
+        const currentZoom = zoomRef.current || 1;
+        const newX = Math.round(dragNodeInitialPosRef.current.x + dx / currentZoom);
+        const newY = Math.round(dragNodeInitialPosRef.current.y + dy / currentZoom);
+
+        draggedNodePosRef.current = { id: draggingNodeId, x: newX, y: newY };
+
+        // Throttle UI position update using requestAnimationFrame for butter-smooth 60/120fps movement
+        if (!rafDragIdRef.current) {
+          rafDragIdRef.current = requestAnimationFrame(() => {
+            rafDragIdRef.current = null;
+            if (draggedNodePosRef.current) {
+              setDraggedNodePos({ ...draggedNodePosRef.current });
+            }
+          });
+        }
       }
     };
 
     const handleGlobalMouseUp = () => {
+      autoPanVelocityRef.current = { vx: 0, vy: 0 };
+      currentCursorPosRef.current = null;
+
+      if (rafDragIdRef.current) {
+        cancelAnimationFrame(rafDragIdRef.current);
+        rafDragIdRef.current = null;
+      }
+
       if (isPanning) {
         setIsPanning(false);
       }
 
       if (draggingNodeId) {
-        if (hasMovedNodeRef.current) {
+        const currentDraggedId = draggingNodeId;
+        const finalPos = draggedNodePosRef.current;
+
+        if (hasMovedNodeRef.current && finalPos) {
           lastDragEndTimeRef.current = Date.now();
+          // Commit final position once at drag end
+          const updatedNodes = pipelineRef.current.nodes.map((n) =>
+            n.id === currentDraggedId ? { ...n, position: { x: finalPos.x, y: finalPos.y } } : n
+          );
+          onUpdatePipeline({
+            ...pipelineRef.current,
+            nodes: updatedNodes,
+          });
         }
+
         setDraggingNodeId(null);
+        setDraggedNodePos(null);
+        draggedNodePosRef.current = null;
         dragStartPosRef.current = null;
         dragNodeInitialPosRef.current = null;
 
@@ -498,14 +634,14 @@ WHERE "STATUS" = 'ACTIVE';`,
     };
 
     if (isPanning || draggingNodeId) {
-      window.addEventListener('mousemove', handleGlobalMouseMove);
+      window.addEventListener('mousemove', handleGlobalMouseMove, { passive: true });
       window.addEventListener('mouseup', handleGlobalMouseUp);
     }
     return () => {
       window.removeEventListener('mousemove', handleGlobalMouseMove);
       window.removeEventListener('mouseup', handleGlobalMouseUp);
     };
-  }, [isPanning, draggingNodeId, zoom, pipeline, onUpdatePipeline]);
+  }, [isPanning, draggingNodeId, onUpdatePipeline]);
 
   // ==========================================
   // Touch & Finger Navigation (Touchscreens)
@@ -537,6 +673,8 @@ WHERE "STATUS" = 'ACTIVE';`,
           setDraggingNodeId(targetNode.id);
           dragStartPosRef.current = { x: touch.clientX, y: touch.clientY };
           dragNodeInitialPosRef.current = { x: targetNode.position.x, y: targetNode.position.y };
+          draggedNodePosRef.current = { id: targetNode.id, x: targetNode.position.x, y: targetNode.position.y };
+          setDraggedNodePos({ id: targetNode.id, x: targetNode.position.x, y: targetNode.position.y });
           hasMovedNodeRef.current = false;
           isDraggingNodeRef.current = false;
           return;
@@ -601,19 +739,19 @@ WHERE "STATUS" = 'ACTIVE';`,
 
       if (!hasMovedNodeRef.current) return;
 
-      const newX = tState.nodeInitialPos.x + dx / zoom;
-      const newY = tState.nodeInitialPos.y + dy / zoom;
+      const currentZoom = zoomRef.current || 1;
+      const newX = Math.round(tState.nodeInitialPos.x + dx / currentZoom);
+      const newY = Math.round(tState.nodeInitialPos.y + dy / currentZoom);
 
-      const updatedNodes = pipeline.nodes.map((n) =>
-        n.id === tState.nodeId
-          ? { ...n, position: { x: Math.max(10, Math.round(newX)), y: Math.max(10, Math.round(newY)) } }
-          : n
-      );
-
-      onUpdatePipeline({
-        ...pipeline,
-        nodes: updatedNodes,
-      });
+      draggedNodePosRef.current = { id: tState.nodeId, x: newX, y: newY };
+      if (!rafDragIdRef.current) {
+        rafDragIdRef.current = requestAnimationFrame(() => {
+          rafDragIdRef.current = null;
+          if (draggedNodePosRef.current) {
+            setDraggedNodePos({ ...draggedNodePosRef.current });
+          }
+        });
+      }
     } else if (tState.mode === 'pinch' && e.touches.length === 2 && tState.initialDist > 0) {
       const t1 = e.touches[0];
       const t2 = e.touches[1];
@@ -637,8 +775,24 @@ WHERE "STATUS" = 'ACTIVE';`,
   };
 
   const handleTouchEnd = () => {
-    if (touchStateRef.current.mode === 'node' && hasMovedNodeRef.current) {
+    if (rafDragIdRef.current) {
+      cancelAnimationFrame(rafDragIdRef.current);
+      rafDragIdRef.current = null;
+    }
+
+    if (touchStateRef.current.mode === 'node' && hasMovedNodeRef.current && draggedNodePosRef.current && touchStateRef.current.nodeId) {
       lastDragEndTimeRef.current = Date.now();
+      const nodeId = touchStateRef.current.nodeId;
+      const finalPos = draggedNodePosRef.current;
+
+      const updatedNodes = pipelineRef.current.nodes.map((n) =>
+        n.id === nodeId ? { ...n, position: { x: finalPos.x, y: finalPos.y } } : n
+      );
+      onUpdatePipeline({
+        ...pipelineRef.current,
+        nodes: updatedNodes,
+      });
+
       if (dragSuppressTimerRef.current) clearTimeout(dragSuppressTimerRef.current);
       dragSuppressTimerRef.current = setTimeout(() => {
         isDraggingNodeRef.current = false;
@@ -649,6 +803,8 @@ WHERE "STATUS" = 'ACTIVE';`,
     touchStateRef.current.mode = 'none';
     setIsPanning(false);
     setDraggingNodeId(null);
+    setDraggedNodePos(null);
+    draggedNodePosRef.current = null;
   };
 
   // Node click handler
@@ -756,9 +912,6 @@ WHERE "STATUS" = 'ACTIVE';`,
             <span className="px-2 py-0.5 bg-slate-100 rounded text-slate-700 font-mono text-[11px]">
               {sortedNodes.length} Query Steps
             </span>
-            <span className="px-2 py-0.5 bg-[#fdf0f6] rounded text-[#c70066] font-mono text-[11px] border border-[#f8b4d9]">
-              {pipeline.edges.length} Sequential Edges
-            </span>
           </div>
         </div>
 
@@ -800,7 +953,7 @@ WHERE "STATUS" = 'ACTIVE';`,
             title="Open Edge & Sequence Connection Manager"
           >
             <GitBranch className="w-3.5 h-3.5 text-[#e20074]" />
-            <span>Edges ({pipeline.edges.length})</span>
+            <span>Edges</span>
           </button>
 
           <button
@@ -837,6 +990,51 @@ WHERE "STATUS" = 'ACTIVE';`,
           </button>
         </div>
       </div>
+
+      {/* Circular Dependency / Cycle Warning Banner */}
+      {cycleAnalysis.hasCycle && (
+        <div className="bg-gradient-to-r from-amber-500/10 via-amber-500/5 to-rose-500/10 border-b border-amber-300 px-6 py-2.5 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-amber-950 z-20 shadow-xs backdrop-blur-xs">
+          <div className="flex items-center gap-2.5">
+            <div className="p-1.5 bg-amber-500 text-white rounded-lg shadow-2xs shrink-0">
+              <RefreshCw className="w-4 h-4 animate-spin" style={{ animationDuration: '8s' }} />
+            </div>
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-bold text-amber-900">Circular Dependency Cycle Detected:</span>
+                <span className="font-mono text-[11px] bg-amber-100 text-amber-900 px-2 py-0.5 rounded border border-amber-300 font-semibold">
+                  {cycleAnalysis.cyclePaths[0]?.summary || 'Closed Loop Cycle'}
+                </span>
+              </div>
+              <p className="text-[11px] text-amber-800/90 mt-0.5">
+                Connected SQL queries form a closed loop. In SAP HANA execution, this triggers iterative loop cycles.
+              </p>
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+            <button
+              type="button"
+              id="resolve-cycle-btn"
+              onClick={handleBreakCycles}
+              className="flex items-center gap-1.5 px-3 py-1 bg-white hover:bg-amber-100 text-amber-900 border border-amber-300 rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+              title="Remove cyclic back-edges to restore a strict linear DAG"
+            >
+              <Repeat className="w-3.5 h-3.5 text-amber-600" />
+              <span>Auto-Break Cycle</span>
+            </button>
+
+            <button
+              type="button"
+              id="simulate-cycle-btn"
+              onClick={onRunSimulation}
+              className="flex items-center gap-1.5 px-3 py-1 bg-amber-600 hover:bg-amber-700 text-white rounded-lg text-xs font-semibold shadow-xs transition-colors cursor-pointer"
+            >
+              <Play className="w-3.5 h-3.5 fill-current" />
+              <span>Simulate Loop</span>
+            </button>
+          </div>
+        </div>
+      )}
 
       {/* Interactive Connecting Mode Notification Banner */}
       {connectingSourceId && (() => {
@@ -876,8 +1074,8 @@ WHERE "STATUS" = 'ACTIVE';`,
         >
           {/* Render Connection Arrows between Sequence Steps based on DAG Edges */}
           <svg
-            className="absolute inset-0 pointer-events-none w-[8000px] h-[6000px] z-0 -left-[2000px] -top-[2000px]"
-            style={{ minWidth: '8000px', minHeight: '6000px' }}
+            className="absolute inset-0 pointer-events-none w-full h-full z-0"
+            style={{ overflow: 'visible' }}
           >
             <defs>
               <marker
@@ -891,6 +1089,17 @@ WHERE "STATUS" = 'ACTIVE';`,
               >
                 <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#e20074" />
               </marker>
+              <marker
+                id="arrow-amber"
+                viewBox="0 0 10 10"
+                refX="6"
+                refY="5"
+                markerWidth="6"
+                markerHeight="6"
+                orient="auto-start-reverse"
+              >
+                <path d="M 0 1.5 L 8 5 L 0 8.5 z" fill="#f59e0b" />
+              </marker>
             </defs>
 
             {pipeline.edges.map((edge) => {
@@ -898,11 +1107,21 @@ WHERE "STATUS" = 'ACTIVE';`,
               const targetNode = pipeline.nodes.find((n) => n.id === edge.target);
               if (!sourceNode || !targetNode) return null;
 
-              // Offset coordinates relative to SVG's shifted box
-              const startX = sourceNode.position.x + 280 + 2000;
-              const startY = sourceNode.position.y + 48 + 2000;
-              const endX = targetNode.position.x + 2000;
-              const endY = targetNode.position.y + 48 + 2000;
+              const isCyclicEdge = cycleAnalysis.cycleEdgeIds.includes(edge.id);
+
+              const sourcePos =
+                draggedNodePos && draggedNodePos.id === sourceNode.id
+                  ? { x: draggedNodePos.x, y: draggedNodePos.y }
+                  : sourceNode.position;
+              const targetPos =
+                draggedNodePos && draggedNodePos.id === targetNode.id
+                  ? { x: draggedNodePos.x, y: draggedNodePos.y }
+                  : targetNode.position;
+
+              const startX = sourcePos.x + 280;
+              const startY = sourcePos.y + 48;
+              const endX = targetPos.x;
+              const endY = targetPos.y + 48;
 
               const dx = Math.max(40, Math.abs(endX - startX) / 2);
               const cX1 = startX + dx;
@@ -915,11 +1134,11 @@ WHERE "STATUS" = 'ACTIVE';`,
                   <path
                     d={`M ${startX} ${startY} C ${cX1} ${cY1}, ${cX2} ${cY2}, ${endX} ${endY}`}
                     fill="none"
-                    stroke="#e20074"
-                    strokeWidth="2.5"
-                    strokeDasharray="6 3"
-                    className="animate-flow-pulse opacity-90"
-                    markerEnd="url(#arrow-magenta)"
+                    stroke={isCyclicEdge ? '#f59e0b' : '#e20074'}
+                    strokeWidth={isCyclicEdge ? '3' : '2.5'}
+                    strokeDasharray={isCyclicEdge ? '4 4' : '6 3'}
+                    className={`animate-flow-pulse ${isCyclicEdge ? 'opacity-100' : 'opacity-90'}`}
+                    markerEnd={isCyclicEdge ? 'url(#arrow-amber)' : 'url(#arrow-magenta)'}
                   />
                 </g>
               );
@@ -932,10 +1151,21 @@ WHERE "STATUS" = 'ACTIVE';`,
             const targetNode = pipeline.nodes.find((n) => n.id === edge.target);
             if (!sourceNode || !targetNode) return null;
 
-            const startX = sourceNode.position.x + 280;
-            const startY = sourceNode.position.y + 48;
-            const endX = targetNode.position.x;
-            const endY = targetNode.position.y + 48;
+            const isCyclicEdge = cycleAnalysis.cycleEdgeIds.includes(edge.id);
+
+            const sourcePos =
+              draggedNodePos && draggedNodePos.id === sourceNode.id
+                ? { x: draggedNodePos.x, y: draggedNodePos.y }
+                : sourceNode.position;
+            const targetPos =
+              draggedNodePos && draggedNodePos.id === targetNode.id
+                ? { x: draggedNodePos.x, y: draggedNodePos.y }
+                : targetNode.position;
+
+            const startX = sourcePos.x + 280;
+            const startY = sourcePos.y + 48;
+            const endX = targetPos.x;
+            const endY = targetPos.y + 48;
             const midX = (startX + endX) / 2;
             const midY = (startY + endY) / 2;
 
@@ -949,23 +1179,39 @@ WHERE "STATUS" = 'ACTIVE';`,
                   top: `${midY}px`,
                   transform: 'translate(-50%, -50%)',
                 }}
-                className="z-20 group/edge flex items-center gap-1.5 px-2.5 py-1 bg-white hover:bg-[#fdf0f6] border border-[#f8b4d9] hover:border-[#e20074] rounded-full shadow-md text-[11px] font-mono text-slate-800 transition-all cursor-pointer select-none"
+                className={`z-20 group/edge flex items-center gap-1.5 px-2.5 py-1 rounded-full shadow-md text-[11px] font-mono transition-colors cursor-pointer select-none ${
+                  isCyclicEdge
+                    ? 'bg-amber-50 hover:bg-amber-100 border border-amber-400 text-amber-900 ring-2 ring-amber-200'
+                    : 'bg-white hover:bg-[#fdf0f6] border border-[#f8b4d9] hover:border-[#e20074] text-slate-800'
+                }`}
                 onClick={(e) => {
                   e.stopPropagation();
                   setEditingEdge(edge);
                   setIsEdgeModalOpen(true);
                 }}
-                title="Click to edit or unlink this execution step sequence"
+                title={
+                  isCyclicEdge
+                    ? 'Circular Dependency Edge: Creates a loop cycle. Click to edit or delete.'
+                    : 'Click to edit or unlink this execution step sequence'
+                }
               >
-                <GitBranch className="w-3 h-3 text-[#e20074]" />
-                <span className="font-bold text-[#c70066]">
+                {isCyclicEdge ? (
+                  <RefreshCw className="w-3 h-3 text-amber-600 animate-spin" style={{ animationDuration: '6s' }} />
+                ) : (
+                  <GitBranch className="w-3 h-3 text-[#e20074]" />
+                )}
+                <span className={`font-bold ${isCyclicEdge ? 'text-amber-800' : 'text-[#c70066]'}`}>
                   #{sourceNode.executionOrder} ➔ #{targetNode.executionOrder}
                 </span>
-                {edge.label && (
+                {isCyclicEdge ? (
+                  <span className="text-amber-700 font-semibold font-sans text-[10px] uppercase tracking-wider px-1 bg-amber-200/80 rounded">
+                    Loop
+                  </span>
+                ) : edge.label ? (
                   <span className="text-slate-500 font-sans text-[10px] hidden sm:inline truncate max-w-[90px]">
                     ({edge.label})
                   </span>
-                )}
+                ) : null}
                 <span className="opacity-0 group-hover/edge:opacity-100 flex items-center gap-1 transition-opacity border-l border-slate-200 pl-1 ml-0.5">
                   <Edit2 className="w-2.5 h-2.5 text-slate-500 hover:text-[#e20074]" />
                   <button
@@ -989,7 +1235,13 @@ WHERE "STATUS" = 'ACTIVE';`,
             const isValid = node.validationSummary ? node.validationSummary.isValid : true;
             const errorCount = node.validationSummary?.errors || 0;
             const isCurrentDragging = draggingNodeId === node.id;
+            const isCyclicNode = cycleAnalysis.cycleNodeIds.includes(node.id);
             const outgoingEdges = pipeline.edges.filter((e) => e.source === node.id);
+
+            const posX =
+              draggedNodePos && draggedNodePos.id === node.id ? draggedNodePos.x : node.position.x;
+            const posY =
+              draggedNodePos && draggedNodePos.id === node.id ? draggedNodePos.y : node.position.y;
 
             return (
               <div
@@ -999,13 +1251,17 @@ WHERE "STATUS" = 'ACTIVE';`,
                 onClick={(e) => handleNodeCardClick(node, e)}
                 style={{
                   position: 'absolute',
-                  left: `${node.position.x}px`,
-                  top: `${node.position.y}px`,
+                  left: `${posX}px`,
+                  top: `${posY}px`,
                   width: '280px',
+                  willChange: isCurrentDragging ? 'left, top' : 'auto',
+                  transition: isCurrentDragging ? 'none' : undefined,
                 }}
-                className={`group bg-white hover:bg-slate-50/50 border rounded-xl shadow-md transition-all duration-150 select-none ${
+                className={`group bg-white hover:bg-slate-50/50 border rounded-xl shadow-md transition-[border-color,box-shadow,background-color,opacity] duration-150 select-none ${
                   isCurrentDragging
                     ? 'z-30 cursor-grabbing ring-2 ring-[#e20074] shadow-xl scale-[1.02] border-[#e20074]'
+                    : isCyclicNode
+                    ? 'z-10 cursor-grab border-amber-400 hover:border-amber-500 ring-2 ring-amber-200/80 shadow-amber-100 hover:shadow-lg'
                     : 'z-10 cursor-grab hover:border-[#e20074] hover:shadow-lg'
                 } ${!node.enabled ? 'opacity-55 bg-slate-50' : ''} ${
                   node.status === 'running'
@@ -1016,6 +1272,8 @@ WHERE "STATUS" = 'ACTIVE';`,
                     ? 'border-rose-500 shadow-rose-100 ring-2 ring-rose-300'
                     : !isValid
                     ? 'border-rose-400 shadow-rose-100 ring-1 ring-rose-400'
+                    : isCyclicNode
+                    ? 'border-amber-400'
                     : 'border-slate-200'
                 } ${
                   connectingSourceId === node.id ? 'ring-2 ring-[#e20074] border-[#e20074]' : ''
@@ -1092,6 +1350,17 @@ WHERE "STATUS" = 'ACTIVE';`,
                     >
                       {node.queryType}
                     </span>
+
+                    {/* Cyclic Node Badge */}
+                    {isCyclicNode && (
+                      <span
+                        className="text-[10px] px-1.5 py-0.5 rounded font-mono font-semibold bg-amber-100 text-amber-800 border border-amber-300 flex items-center gap-0.5 shrink-0"
+                        title="This query is part of a circular dependency execution loop"
+                      >
+                        <RefreshCw className="w-2.5 h-2.5 animate-spin" style={{ animationDuration: '6s' }} />
+                        <span>Loop</span>
+                      </span>
+                    )}
                   </div>
 
                   {/* Header Status & Documentation Icon */}
@@ -1358,28 +1627,37 @@ WHERE "STATUS" = 'ACTIVE';`,
           })}
 
           {/* Append New Step Drop Zone Card */}
-          <div
-            data-interactive="true"
-            style={{
-              left: `${sortedNodes.length > 0 ? sortedNodes[sortedNodes.length - 1].position.x + 330 : 80}px`,
-              top: `${sortedNodes.length > 0 ? sortedNodes[sortedNodes.length - 1].position.y : 160}px`,
-              width: '280px',
-              minHeight: '230px',
-            }}
-            onClick={handleAddNode}
-            className="absolute border-2 border-dashed border-slate-300 hover:border-[#e20074] bg-white/80 hover:bg-[#fdf0f6]/40 rounded-xl p-6 flex flex-col items-center justify-center text-center cursor-pointer transition-all group shadow-2xs hover:shadow-md select-none z-10"
-            title="Add new SQL Query to sequence"
-          >
-            <div className="w-10 h-10 rounded-full bg-[#fdf0f6] border border-[#f8b4d9] flex items-center justify-center text-[#e20074] group-hover:scale-110 transition-transform mb-2">
-              <Plus className="w-5 h-5" />
-            </div>
-            <span className="font-semibold text-xs text-slate-800 group-hover:text-[#e20074] transition-colors">
-              + Add SQL Query Step
-            </span>
-            <span className="text-[11px] text-slate-500 mt-1 max-w-[200px] leading-snug">
-              Append a new analytical SELECT query to this pipeline
-            </span>
-          </div>
+          {(() => {
+            const maxNodeX = sortedNodes.length > 0 ? Math.max(...sortedNodes.map((n) => n.position.x)) : 80;
+            const refNode = sortedNodes.find((n) => n.position.x === maxNodeX);
+            const appendX = sortedNodes.length > 0 ? maxNodeX + 330 : 80;
+            const appendY = refNode ? refNode.position.y : 160;
+
+            return (
+              <div
+                data-interactive="true"
+                style={{
+                  left: `${appendX}px`,
+                  top: `${appendY}px`,
+                  width: '280px',
+                  minHeight: '230px',
+                }}
+                onClick={handleAddNode}
+                className="absolute border-2 border-dashed border-slate-300 hover:border-[#e20074] bg-white/80 hover:bg-[#fdf0f6]/40 rounded-xl p-6 flex flex-col items-center justify-center text-center cursor-pointer transition-all group shadow-2xs hover:shadow-md select-none z-10"
+                title="Add new SQL Query to sequence"
+              >
+                <div className="w-10 h-10 rounded-full bg-[#fdf0f6] border border-[#f8b4d9] flex items-center justify-center text-[#e20074] group-hover:scale-110 transition-transform mb-2">
+                  <Plus className="w-5 h-5" />
+                </div>
+                <span className="font-semibold text-xs text-slate-800 group-hover:text-[#e20074] transition-colors">
+                  + Add SQL Query Step
+                </span>
+                <span className="text-[11px] text-slate-500 mt-1 max-w-[200px] leading-snug">
+                  Append a new analytical SELECT query to this pipeline
+                </span>
+              </div>
+            );
+          })()}
         </div>
       </div>
 

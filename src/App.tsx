@@ -49,13 +49,17 @@ export default function App() {
   const [isExportOpen, setIsExportOpen] = useState(false);
   const [isNewPipelineOpen, setIsNewPipelineOpen] = useState(false);
 
-  // Save pipelines to localStorage
+  // Save pipelines to localStorage with debouncing
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(pipelines));
-    } catch (e) {
-      console.error('Error saving pipelines:', e);
-    }
+    const timer = setTimeout(() => {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(pipelines));
+      } catch (e) {
+        console.error('Error saving pipelines:', e);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
   }, [pipelines]);
 
   // Current active pipeline
