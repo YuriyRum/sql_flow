@@ -29,7 +29,7 @@ export function getDefaultDocumentation(node: SQLNode): string {
 ${node.description || 'SAP HANA analytical query node performing data transformation.'}
 
 - Execution Order: Step #${node.executionOrder}
-- Query Type:      ${node.queryType} (Safe Mode Read-Only SELECT)
+- Query Type:      ${node.queryType} (Analytical Read-Only SELECT)
 - Target Output:   ${targetAsset}
 - Status:          ${node.enabled ? 'Active / Enabled' : 'Disabled'}
 

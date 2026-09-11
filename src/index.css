@@ -39,9 +39,27 @@
   }
 
   ::selection {
-    background-color: #fce4f0;
-    color: #99004f;
+    background-color: rgba(226, 0, 116, 0.18);
+    color: inherit;
   }
+}
+
+#hana-sql-textarea::selection {
+  background-color: rgba(226, 0, 116, 0.22) !important;
+  color: transparent !important;
+}
+
+#hana-sql-textarea::-moz-selection {
+  background-color: rgba(226, 0, 116, 0.22) !important;
+  color: transparent !important;
+}
+
+.no-scrollbar::-webkit-scrollbar {
+  display: none;
+}
+.no-scrollbar {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
 }
 
 @keyframes fadeIn {

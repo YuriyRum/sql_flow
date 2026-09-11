@@ -14,6 +14,9 @@ interface HanaCodeEditorProps {
   onFormat?: () => void;
   readOnly?: boolean;
   onCursorChange?: (line: number, col: number) => void;
+  onUndo?: () => void;
+  onRedo?: () => void;
+  onSave?: () => void;
 }
 
 export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
@@ -22,6 +25,9 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
   diagnostics,
   readOnly = false,
   onCursorChange,
+  onUndo,
+  onRedo,
+  onSave,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
@@ -73,8 +79,33 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
     }
   };
 
-  // Handle Tab key and auto-indent in editor
+  // Handle Tab, Search, Undo, Redo, Save in editor
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+    const modifier = isMac ? e.metaKey : e.ctrlKey;
+
+    if (modifier && e.key.toLowerCase() === 'z') {
+      e.preventDefault();
+      if (e.shiftKey) {
+        onRedo?.();
+      } else {
+        onUndo?.();
+      }
+      return;
+    }
+
+    if (modifier && e.key.toLowerCase() === 'y') {
+      e.preventDefault();
+      onRedo?.();
+      return;
+    }
+
+    if (modifier && e.key.toLowerCase() === 's') {
+      e.preventDefault();
+      onSave?.();
+      return;
+    }
+
     if (e.key === 'Tab') {
       e.preventDefault();
       const start = e.currentTarget.selectionStart;
@@ -87,7 +118,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
           textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + 4;
         }
       }, 0);
-    } else if (e.key === 'f' && (e.ctrlKey || e.metaKey)) {
+    } else if (e.key === 'f' && modifier) {
       e.preventDefault();
       setShowSearch((prev) => !prev);
     }
@@ -395,7 +426,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
             autoCapitalize="off"
             autoComplete="off"
             autoCorrect="off"
-            className="absolute inset-0 w-full h-full py-3 px-4 text-xs font-mono bg-transparent text-transparent caret-[#e20074] resize-none outline-none overflow-auto z-10 selection:bg-[#fce4f0] selection:text-transparent"
+            className="absolute inset-0 w-full h-full py-3 px-4 text-xs font-mono bg-transparent text-transparent caret-[#e20074] resize-none outline-none overflow-auto z-10 selection:bg-[#e20074]/20 selection:text-transparent"
             style={{ tabSize: 4, lineHeight: '1.5rem' }}
           />
         </div>

@@ -1,7 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { FlowPipeline, SQLNode } from './types';
 import { SAMPLE_PIPELINES } from './data/samplePipelines';
-import { Header } from './components/Header';
 import { FlowCanvas } from './components/FlowCanvas';
 import { FullSizeSqlEditor } from './components/FullSizeSqlEditor';
 import { PipelineSimulationModal } from './components/PipelineSimulationModal';
@@ -97,9 +96,6 @@ export default function App() {
 
   return (
     <div className="flex flex-col h-screen w-screen bg-slate-50 text-slate-900 overflow-hidden font-sans">
-      {/* Global Application Header */}
-      <Header pipeline={activePipeline} />
-
       {/* Main Flow Canvas View */}
       <main className="flex-1 relative flex flex-col overflow-hidden">
         {activePipeline && (

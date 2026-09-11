@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { SQLNode, ValidationResult, FlowPipeline } from '../types';
 import { HanaCodeEditor } from './HanaCodeEditor';
 import { validateHanaSql, formatHanaSql } from '../utils/hanaSqlValidator';
@@ -18,11 +18,13 @@ import {
   Terminal,
   Layers,
   ArrowRightLeft,
-  ShieldCheck,
   Activity,
-  Wrench,
   CheckCheck,
-  BookOpen
+  BookOpen,
+  Undo2,
+  Redo2,
+  Save,
+  X
 } from 'lucide-react';
 
 interface FullSizeSqlEditorProps {
@@ -47,69 +49,160 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
   const [copied, setCopied] = useState(false);
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
   const [diagFilter, setDiagFilter] = useState<'all' | 'errors' | 'warnings' | 'info'>('all');
+  const [saveSuccess, setSaveSuccess] = useState(false);
+
+  // Reference for saved baseline to detect unsaved modifications
+  const savedNodeRef = useRef<SQLNode>({ ...node });
+
+  // Undo / Redo history stack
+  const historyRef = useRef<string[]>([node.sqlContent]);
+  const historyIndexRef = useRef<number>(0);
+  const isUndoRedoActionRef = useRef<boolean>(false);
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
+
+  // Unsaved changes warning modal state
+  const [showUnsavedModal, setShowUnsavedModal] = useState(false);
+  const [pendingAction, setPendingAction] = useState<
+    null | { type: 'close' } | { type: 'navigate'; targetNodeId: string }
+  >(null);
+
+  // Check if current node has unsaved changes compared to saved baseline
+  const isDirty =
+    currentNode.name !== savedNodeRef.current.name ||
+    (currentNode.description || '') !== (savedNodeRef.current.description || '') ||
+    currentNode.sqlContent !== savedNodeRef.current.sqlContent;
+
+  const updateUndoRedoState = useCallback(() => {
+    setCanUndo(historyIndexRef.current > 0);
+    setCanRedo(historyIndexRef.current < historyRef.current.length - 1);
+  }, []);
 
   // Sync state if incoming node changes
   useEffect(() => {
     setCurrentNode(node);
+    savedNodeRef.current = { ...node };
     const res = validateHanaSql(node.sqlContent);
     setValidation(res);
-  }, [node]);
+    historyRef.current = [node.sqlContent];
+    historyIndexRef.current = 0;
+    updateUndoRedoState();
+    setSaveSuccess(false);
+  }, [node, updateUndoRedoState]);
 
-  // Revalidate on SQL change
-  const handleSqlChange = (newSql: string) => {
-    const updated = { ...currentNode, sqlContent: newSql };
-    const res = validateHanaSql(newSql);
-    setValidation(res);
-    updated.validationSummary = {
-      isValid: res.isValid,
-      errors: res.errorCount,
-      warnings: res.warningCount,
+  // Perform Save
+  const handleSave = useCallback(() => {
+    const res = validateHanaSql(currentNode.sqlContent);
+    const updatedToSave: SQLNode = {
+      ...currentNode,
+      validationSummary: {
+        isValid: res.isValid,
+        errors: res.errorCount,
+        warnings: res.warningCount,
+      },
+      inputTables: res.extractedTables.inputs,
     };
-    // Sync extracted tables & params
-    updated.inputTables = res.extractedTables.inputs;
+
     if (res.extractedTables.outputs.length > 0) {
       const firstOut = res.extractedTables.outputs[0];
       if (firstOut.includes('.')) {
         const parts = firstOut.replace(/"/g, '').split('.');
-        updated.targetSchema = parts[0];
-        updated.targetTable = parts[1];
+        updatedToSave.targetSchema = parts[0];
+        updatedToSave.targetTable = parts[1];
       } else {
-        updated.targetTable = firstOut.replace(/"/g, '');
+        updatedToSave.targetTable = firstOut.replace(/"/g, '');
       }
     }
-    setCurrentNode(updated);
-    onSaveNode(updated);
-  };
 
+    setCurrentNode(updatedToSave);
+    savedNodeRef.current = { ...updatedToSave };
+    onSaveNode(updatedToSave);
+
+    setSaveSuccess(true);
+    setTimeout(() => {
+      setSaveSuccess(false);
+    }, 2500);
+  }, [currentNode, onSaveNode]);
+
+  // Revalidate on SQL change and record history
+  const handleSqlChange = useCallback(
+    (newSql: string, pushHistory = true) => {
+      const res = validateHanaSql(newSql);
+      setValidation(res);
+
+      setCurrentNode((prev) => {
+        const updated = { ...prev, sqlContent: newSql };
+        updated.validationSummary = {
+          isValid: res.isValid,
+          errors: res.errorCount,
+          warnings: res.warningCount,
+        };
+        updated.inputTables = res.extractedTables.inputs;
+        if (res.extractedTables.outputs.length > 0) {
+          const firstOut = res.extractedTables.outputs[0];
+          if (firstOut.includes('.')) {
+            const parts = firstOut.replace(/"/g, '').split('.');
+            updated.targetSchema = parts[0];
+            updated.targetTable = parts[1];
+          } else {
+            updated.targetTable = firstOut.replace(/"/g, '');
+          }
+        }
+        return updated;
+      });
+
+      if (pushHistory && !isUndoRedoActionRef.current) {
+        // Truncate redo history and push new state
+        const currentIdx = historyIndexRef.current;
+        const currentVal = historyRef.current[currentIdx];
+        if (currentVal !== newSql) {
+          const newHistory = historyRef.current.slice(0, currentIdx + 1);
+          newHistory.push(newSql);
+          // Cap history at 150 items
+          if (newHistory.length > 150) {
+            newHistory.shift();
+          }
+          historyRef.current = newHistory;
+          historyIndexRef.current = newHistory.length - 1;
+          updateUndoRedoState();
+        }
+      }
+    },
+    [updateUndoRedoState]
+  );
+
+  // Undo Action
+  const handleUndo = useCallback(() => {
+    if (historyIndexRef.current > 0) {
+      isUndoRedoActionRef.current = true;
+      historyIndexRef.current -= 1;
+      const previousSql = historyRef.current[historyIndexRef.current];
+      handleSqlChange(previousSql, false);
+      updateUndoRedoState();
+      setTimeout(() => {
+        isUndoRedoActionRef.current = false;
+      }, 50);
+    }
+  }, [handleSqlChange, updateUndoRedoState]);
+
+  // Redo Action
+  const handleRedo = useCallback(() => {
+    if (historyIndexRef.current < historyRef.current.length - 1) {
+      isUndoRedoActionRef.current = true;
+      historyIndexRef.current += 1;
+      const nextSql = historyRef.current[historyIndexRef.current];
+      handleSqlChange(nextSql, false);
+      updateUndoRedoState();
+      setTimeout(() => {
+        isUndoRedoActionRef.current = false;
+      }, 50);
+    }
+  }, [handleSqlChange, updateUndoRedoState]);
+
+  // Format SQL
   const handleFormatSql = () => {
     const formatted = formatHanaSql(currentNode.sqlContent);
     handleSqlChange(formatted);
-  };
-
-  const handleApplyQuickFix = (fix: string | undefined, lineNum: number) => {
-    if (!fix) return;
-    if (fix.includes("Change 'CREATE TABLE' to 'CREATE COLUMN TABLE'")) {
-      const newSql = currentNode.sqlContent.replace(/CREATE\s+TABLE/i, 'CREATE COLUMN TABLE');
-      handleSqlChange(newSql);
-    } else if (fix.includes("WITH PRIMARY KEY")) {
-      const newSql = currentNode.sqlContent.trim().replace(/;?$/, '\nWITH PRIMARY KEY;');
-      handleSqlChange(newSql);
-    } else if (fix.includes("END;")) {
-      const newSql = currentNode.sqlContent.trim().replace(/;?$/, '\nEND;');
-      handleSqlChange(newSql);
-    } else if (fix.includes("Replace ISNULL with IFNULL")) {
-      const newSql = currentNode.sqlContent.replace(/ISNULL\s*\(/gi, 'IFNULL(');
-      handleSqlChange(newSql);
-    } else if (fix.includes("Replace GETDATE() with CURRENT_TIMESTAMP")) {
-      const newSql = currentNode.sqlContent.replace(/GETDATE\s*\(\s*\)/gi, 'CURRENT_TIMESTAMP');
-      handleSqlChange(newSql);
-    } else if (fix.includes("Add trailing semicolon")) {
-      const newSql = currentNode.sqlContent.trim() + ';';
-      handleSqlChange(newSql);
-    } else if (fix.includes("Convert query to SELECT")) {
-      const newSql = `SELECT * FROM (${currentNode.sqlContent.replace(/;?$/, '')});`;
-      handleSqlChange(newSql);
-    }
   };
 
   const handleInsertSnippet = (snippetType: string) => {
@@ -179,6 +272,96 @@ FROM "SCHEMA"."FACT_SALES";`;
     setTimeout(() => setCopied(false), 2000);
   };
 
+  // Safe navigation checks before leaving or switching queries
+  const handleAttemptClose = () => {
+    if (isDirty) {
+      setPendingAction({ type: 'close' });
+      setShowUnsavedModal(true);
+    } else {
+      onClose();
+    }
+  };
+
+  const handleAttemptNavigate = (targetNodeId: string) => {
+    if (isDirty) {
+      setPendingAction({ type: 'navigate', targetNodeId });
+      setShowUnsavedModal(true);
+    } else {
+      onNavigateNode(targetNodeId);
+    }
+  };
+
+  // Resolve unsaved changes warning dialog
+  const handleConfirmSaveAndProceed = () => {
+    handleSave();
+    setShowUnsavedModal(false);
+    if (pendingAction?.type === 'close') {
+      onClose();
+    } else if (pendingAction?.type === 'navigate') {
+      onNavigateNode(pendingAction.targetNodeId);
+    }
+    setPendingAction(null);
+  };
+
+  const handleConfirmDiscardAndProceed = () => {
+    setCurrentNode(savedNodeRef.current);
+    setShowUnsavedModal(false);
+    if (pendingAction?.type === 'close') {
+      onClose();
+    } else if (pendingAction?.type === 'navigate') {
+      onNavigateNode(pendingAction.targetNodeId);
+    }
+    setPendingAction(null);
+  };
+
+  const handleCancelUnsavedModal = () => {
+    setShowUnsavedModal(false);
+    setPendingAction(null);
+  };
+
+  // Keyboard shortcut listener for Ctrl+S, Ctrl+Z, Ctrl+Y, Escape
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
+      const modifier = isMac ? e.metaKey : e.ctrlKey;
+
+      if (modifier && e.key.toLowerCase() === 's') {
+        e.preventDefault();
+        handleSave();
+        return;
+      }
+
+      if (modifier && e.key.toLowerCase() === 'z') {
+        if (e.shiftKey) {
+          e.preventDefault();
+          handleRedo();
+        } else {
+          e.preventDefault();
+          handleUndo();
+        }
+        return;
+      }
+
+      if (modifier && e.key.toLowerCase() === 'y') {
+        e.preventDefault();
+        handleRedo();
+        return;
+      }
+
+      if (e.key === 'Escape') {
+        if (showUnsavedModal) {
+          setShowUnsavedModal(false);
+          setPendingAction(null);
+        } else {
+          handleAttemptClose();
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleGlobalKeyDown);
+    return () => window.removeEventListener('keydown', handleGlobalKeyDown);
+  }, [handleSave, handleUndo, handleRedo, showUnsavedModal, isDirty]);
+
   // Sequence nodes sorted by execution order
   const sortedNodes = [...pipeline.nodes].sort((a, b) => a.executionOrder - b.executionOrder);
   const currentIndex = sortedNodes.findIndex((n) => n.id === currentNode.id);
@@ -206,8 +389,8 @@ FROM "SCHEMA"."FACT_SALES";`;
           <button
             type="button"
             id="back-to-flow-button"
-            onClick={onClose}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded-md text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm"
+            onClick={handleAttemptClose}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded-md text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
             title="Return to visual flow diagram"
           >
             <ArrowLeft className="w-3.5 h-3.5" />
@@ -227,38 +410,102 @@ FROM "SCHEMA"."FACT_SALES";`;
               id="node-title-input"
               value={currentNode.name}
               onChange={(e) => {
-                const updated = { ...currentNode, name: e.target.value };
-                setCurrentNode(updated);
-                onSaveNode(updated);
+                setCurrentNode((prev) => ({ ...prev, name: e.target.value }));
               }}
-              className="bg-transparent font-semibold text-sm text-slate-900 focus:bg-slate-100 rounded px-2 py-1 outline-none border border-transparent focus:border-[#e20074] w-64 md:w-80 transition-colors"
+              className="bg-transparent font-semibold text-sm text-slate-900 focus:bg-slate-100 rounded px-2 py-1 outline-none border border-transparent focus:border-[#e20074] w-56 md:w-72 transition-colors"
               placeholder="Query Node Name..."
             />
           </div>
 
-          {/* Query Type Indicator (Enforced Safe Mode) */}
+          {/* Query Type Indicator */}
           <div
             id="query-type-badge"
             className="flex items-center gap-1.5 px-2.5 py-1 bg-[#fdf0f6] border border-[#f8b4d9] rounded text-xs font-semibold text-[#c70066]"
-            title="Safe Mode: SELECT query only"
+            title="SELECT analytical query"
           >
             <span className="text-slate-500 font-normal">Type:</span>
             <span className="font-mono text-[#e20074] font-bold">SELECT</span>
           </div>
 
-          {/* Safe Mode Enforced Badge */}
-          <div
-            id="editor-safe-mode-badge"
-            className="hidden lg:flex items-center gap-1.5 px-2.5 py-1 bg-emerald-50 text-emerald-800 rounded-md border border-emerald-200 text-xs font-semibold"
-            title="Safe Mode active: Read-only SELECT operations only. Table creation and deletion are blocked."
-          >
-            <ShieldCheck className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
-            <span>Safe Mode Active</span>
-          </div>
+          {/* Unsaved vs Saved Status Badge */}
+          {saveSuccess ? (
+            <div
+              id="save-status-success"
+              className="hidden md:flex items-center gap-1 px-2.5 py-1 bg-emerald-50 text-emerald-800 border border-emerald-200 rounded text-xs font-medium animate-fadeIn"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+              <span>Saved</span>
+            </div>
+          ) : isDirty ? (
+            <div
+              id="save-status-unsaved"
+              className="hidden md:flex items-center gap-1.5 px-2.5 py-1 bg-amber-50 text-amber-800 border border-amber-300 rounded text-xs font-medium"
+            >
+              <span className="w-2 h-2 rounded-full bg-amber-500 animate-pulse shrink-0" />
+              <span>Unsaved changes</span>
+            </div>
+          ) : (
+            <div
+              id="save-status-clean"
+              className="hidden md:flex items-center gap-1 px-2.5 py-1 text-slate-500 text-xs"
+            >
+              <Check className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+              <span>All changes saved</span>
+            </div>
+          )}
         </div>
 
-        {/* Right Section: Syntax Status Badge & Actions */}
+        {/* Right Section: Undo/Redo, Save Button, Syntax Status & Actions */}
         <div className="flex items-center gap-2">
+          {/* Undo Button (Ctrl+Z) */}
+          <button
+            type="button"
+            id="undo-btn"
+            disabled={!canUndo}
+            onClick={handleUndo}
+            className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] disabled:opacity-35 disabled:pointer-events-none rounded text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
+            title="Undo last change (Ctrl+Z / Cmd+Z)"
+          >
+            <Undo2 className="w-3.5 h-3.5 text-[#e20074]" />
+            <span className="hidden sm:inline">Undo</span>
+          </button>
+
+          {/* Redo Button (Ctrl+Y / Ctrl+Shift+Z) */}
+          <button
+            type="button"
+            id="redo-btn"
+            disabled={!canRedo}
+            onClick={handleRedo}
+            className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] disabled:opacity-35 disabled:pointer-events-none rounded text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
+            title="Redo change (Ctrl+Y / Cmd+Shift+Z)"
+          >
+            <Redo2 className="w-3.5 h-3.5 text-[#e20074]" />
+            <span className="hidden sm:inline">Redo</span>
+          </button>
+
+          <div className="h-4 w-px bg-slate-200 mx-0.5" />
+
+          {/* Explicit Save Button */}
+          <button
+            type="button"
+            id="save-node-btn"
+            onClick={handleSave}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-semibold transition-all shadow-sm cursor-pointer ${
+              isDirty
+                ? 'bg-[#e20074] hover:bg-[#c70066] text-white shadow-md animate-pulse'
+                : 'bg-white hover:bg-slate-50 text-slate-800 border border-slate-200 hover:border-[#f8b4d9]'
+            }`}
+            title="Save changes to this query node (Ctrl+S / Cmd+S)"
+          >
+            <Save className={`w-3.5 h-3.5 ${isDirty ? 'text-white' : 'text-[#e20074]'}`} />
+            <span>Save</span>
+            <span className={`text-[10px] font-mono ml-0.5 px-1 py-0.2 rounded ${isDirty ? 'bg-[#c70066]/60 text-white' : 'bg-slate-100 text-slate-500'}`}>
+              Ctrl+S
+            </span>
+          </button>
+
+          <div className="h-4 w-px bg-slate-200 mx-0.5" />
+
           {/* Real-time Syntax Health Indicator */}
           <div
             id="syntax-status-badge"
@@ -279,7 +526,9 @@ FROM "SCHEMA"."FACT_SALES";`;
             ) : (
               <>
                 <AlertCircle className="w-3.5 h-3.5 text-rose-600 shrink-0" />
-                <span className="font-semibold">{validation.errorCount} Syntax Error{validation.errorCount > 1 ? 's' : ''}</span>
+                <span className="font-semibold">
+                  {validation.errorCount} Syntax Error{validation.errorCount > 1 ? 's' : ''}
+                </span>
               </>
             )}
           </div>
@@ -291,7 +540,7 @@ FROM "SCHEMA"."FACT_SALES";`;
             type="button"
             id="format-sql-btn"
             onClick={handleFormatSql}
-            className="flex items-center gap-1.5 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm"
+            className="flex items-center gap-1.5 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
             title="Format SAP HANA SQL"
           >
             <Code2 className="w-3.5 h-3.5 text-[#e20074]" />
@@ -302,7 +551,7 @@ FROM "SCHEMA"."FACT_SALES";`;
           <div className="relative group">
             <button
               type="button"
-              className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm"
+              className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
             >
               <FileCode className="w-3.5 h-3.5 text-[#e20074]" />
               <span>Snippets</span>
@@ -311,7 +560,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               <button
                 type="button"
                 onClick={() => handleInsertSnippet('aggregation_kpi')}
-                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2"
+                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2 cursor-pointer"
               >
                 <Layers className="w-3.5 h-3.5 text-[#e20074]" />
                 <span>SELECT KPI Aggregation</span>
@@ -319,7 +568,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               <button
                 type="button"
                 onClick={() => handleInsertSnippet('master_join')}
-                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2"
+                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2 cursor-pointer"
               >
                 <ArrowRightLeft className="w-3.5 h-3.5 text-amber-600" />
                 <span>SELECT Dimension Joins</span>
@@ -327,7 +576,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               <button
                 type="button"
                 onClick={() => handleInsertSnippet('window_ranking')}
-                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2"
+                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2 cursor-pointer"
               >
                 <Zap className="w-3.5 h-3.5 text-[#e20074]" />
                 <span>SELECT Window DENSE_RANK()</span>
@@ -335,7 +584,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               <button
                 type="button"
                 onClick={() => handleInsertSnippet('cte_query')}
-                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2"
+                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2 cursor-pointer"
               >
                 <Terminal className="w-3.5 h-3.5 text-indigo-600" />
                 <span>WITH CTE Sequence SELECT</span>
@@ -347,7 +596,7 @@ FROM "SCHEMA"."FACT_SALES";`;
           <button
             type="button"
             onClick={handleCopySql}
-            className="p-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded text-xs transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm"
+            className="p-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded text-xs transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
             title="Copy SQL Query"
           >
             {copied ? <Check className="w-3.5 h-3.5 text-emerald-600" /> : <Copy className="w-3.5 h-3.5" />}
@@ -369,7 +618,7 @@ FROM "SCHEMA"."FACT_SALES";`;
         </div>
       </header>
 
-      {/* Node Metadata Sub-Bar: Title & Description Editing + Documentation Button */}
+      {/* Node Metadata Sub-Bar: Title & Description Editing + Save Button */}
       <div className="bg-white border-b border-slate-200 px-4 py-2 flex flex-wrap items-center justify-between gap-3 text-xs shrink-0 shadow-2xs">
         <div className="flex items-center gap-3 flex-1 min-w-[320px]">
           <div className="flex items-center gap-2">
@@ -379,9 +628,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               id="node-title-edit-input"
               value={currentNode.name}
               onChange={(e) => {
-                const updated = { ...currentNode, name: e.target.value };
-                setCurrentNode(updated);
-                onSaveNode(updated);
+                setCurrentNode((prev) => ({ ...prev, name: e.target.value }));
               }}
               className="bg-slate-50 hover:bg-white focus:bg-white border border-slate-200 focus:border-[#e20074] rounded-md px-2.5 py-1 text-xs font-semibold text-slate-900 w-52 md:w-64 outline-none transition-colors"
               placeholder="Query Node Name..."
@@ -395,9 +642,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               id="node-desc-edit-input"
               value={currentNode.description || ''}
               onChange={(e) => {
-                const updated = { ...currentNode, description: e.target.value };
-                setCurrentNode(updated);
-                onSaveNode(updated);
+                setCurrentNode((prev) => ({ ...prev, description: e.target.value }));
               }}
               className="bg-slate-50 hover:bg-white focus:bg-white border border-slate-200 focus:border-[#e20074] rounded-md px-2.5 py-1 text-xs text-slate-700 flex-1 outline-none transition-colors"
               placeholder="Describe this SQL query transformation step..."
@@ -405,8 +650,21 @@ FROM "SCHEMA"."FACT_SALES";`;
           </div>
         </div>
 
-        {/* Action: Open Full Screen Documentation & Save indicator */}
+        {/* Save and documentation actions */}
         <div className="flex items-center gap-2 shrink-0">
+          <button
+            type="button"
+            onClick={handleSave}
+            className={`flex items-center gap-1.5 px-3 py-1 rounded-md text-xs font-semibold transition-all shadow-xs cursor-pointer ${
+              isDirty
+                ? 'bg-[#e20074] hover:bg-[#c70066] text-white'
+                : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
+            }`}
+          >
+            <Save className="w-3.5 h-3.5" />
+            <span>{isDirty ? 'Save Changes' : 'Saved'}</span>
+          </button>
+
           {onOpenDocumentation && (
             <button
               type="button"
@@ -416,27 +674,25 @@ FROM "SCHEMA"."FACT_SALES";`;
               title="Open full screen documentation for this node"
             >
               <BookOpen className="w-3.5 h-3.5 text-[#e20074]" />
-              <span>Documentation (Full Screen)</span>
+              <span>Documentation</span>
             </button>
           )}
-
-          <div className="flex items-center gap-1 text-[11px] text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded border border-emerald-200 font-medium">
-            <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-            <span>Saved</span>
-          </div>
         </div>
       </div>
 
-      {/* Main Workspace Layout (Editor on Left, Diagnostics exclusively on Right) */}
+      {/* Main Workspace Layout (Editor on Left, Diagnostics on Right) */}
       <div className="flex-1 flex flex-col lg:flex-row overflow-hidden">
         {/* Left / Center: Full Size Code Editor */}
         <div className="flex-1 flex flex-col h-full overflow-hidden p-3 bg-slate-100">
           <div className="flex-1 h-full min-h-[300px] border border-slate-200 rounded-xl overflow-hidden shadow-sm">
             <HanaCodeEditor
               value={currentNode.sqlContent}
-              onChange={handleSqlChange}
+              onChange={(newVal) => handleSqlChange(newVal, true)}
               diagnostics={validation.diagnostics}
               onCursorChange={(line, col) => setCursorPos({ line, col })}
+              onUndo={handleUndo}
+              onRedo={handleRedo}
+              onSave={handleSave}
             />
           </div>
         </div>
@@ -462,24 +718,13 @@ FROM "SCHEMA"."FACT_SALES";`;
             </div>
           </div>
 
-          {/* Safe Mode Enforced Notice Card */}
-          <div className="p-3 bg-emerald-50/70 border-b border-emerald-100 flex items-start gap-2.5">
-            <ShieldCheck className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
-            <div className="text-xs space-y-0.5">
-              <p className="font-semibold text-emerald-900">Safe Mode: SELECT Enforced</p>
-              <p className="text-[11px] text-emerald-700 leading-snug">
-                Read-only analytical queries are permitted. Table schema modifications (CREATE, DROP, ALTER) and mutations (INSERT, UPDATE, DELETE) are strictly blocked.
-              </p>
-            </div>
-          </div>
-
           {/* Diagnostic Filter Bar */}
           <div className="px-4 py-2 border-b border-slate-200 bg-white flex items-center justify-between gap-2 shrink-0">
             <div className="flex items-center gap-1">
               <button
                 type="button"
                 onClick={() => setDiagFilter('all')}
-                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer ${
                   diagFilter === 'all'
                     ? 'bg-[#e20074] text-white font-semibold shadow-sm'
                     : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
@@ -491,7 +736,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               <button
                 type="button"
                 onClick={() => setDiagFilter('errors')}
-                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer ${
                   diagFilter === 'errors'
                     ? 'bg-rose-600 text-white font-semibold shadow-sm'
                     : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
@@ -503,7 +748,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               <button
                 type="button"
                 onClick={() => setDiagFilter('warnings')}
-                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                className={`px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer ${
                   diagFilter === 'warnings'
                     ? 'bg-amber-600 text-white font-semibold shadow-sm'
                     : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
@@ -516,7 +761,7 @@ FROM "SCHEMA"."FACT_SALES";`;
                 <button
                   type="button"
                   onClick={() => setDiagFilter('info')}
-                  className={`px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+                  className={`px-2.5 py-1 rounded text-xs font-medium transition-colors cursor-pointer ${
                     diagFilter === 'info'
                       ? 'bg-sky-600 text-white font-semibold shadow-sm'
                       : 'bg-slate-100 hover:bg-slate-200 text-slate-700'
@@ -539,9 +784,9 @@ FROM "SCHEMA"."FACT_SALES";`;
                 <div className="w-12 h-12 rounded-full bg-emerald-50 border border-emerald-200 flex items-center justify-center text-emerald-600 mb-3 shadow-sm">
                   <CheckCheck className="w-6 h-6" />
                 </div>
-                <p className="font-semibold text-slate-900 text-sm">HANA SQL Syntax & Safe Mode Valid</p>
+                <p className="font-semibold text-slate-900 text-sm">HANA SQL Syntax Valid</p>
                 <p className="text-slate-500 text-xs mt-1 max-w-xs leading-relaxed">
-                  No syntax errors or unauthorized operations detected. Query conforms to SAP HANA Cloud SQL analytical standards.
+                  No syntax errors detected. Query conforms to SAP HANA Cloud analytical standards.
                 </p>
               </div>
             ) : filteredDiagnostics.length === 0 ? (
@@ -549,65 +794,34 @@ FROM "SCHEMA"."FACT_SALES";`;
                 <p className="text-xs">No issues found matching the "{diagFilter}" filter.</p>
               </div>
             ) : (
-              <div className="space-y-2.5">
+              <div className="space-y-2">
                 {filteredDiagnostics.map((diag, idx) => (
                   <div
                     key={idx}
-                    className={`p-3.5 rounded-xl border flex flex-col gap-2 transition-all shadow-sm ${
+                    className={`p-3 rounded-xl border flex flex-col gap-1.5 transition-all shadow-2xs ${
                       diag.severity === 'error'
-                        ? 'bg-rose-50/60 border-rose-200 text-rose-900'
+                        ? 'bg-rose-50/70 border-rose-200 text-rose-900'
                         : diag.severity === 'warning'
-                        ? 'bg-amber-50/60 border-amber-200 text-amber-900'
-                        : 'bg-sky-50/60 border-sky-200 text-sky-900'
+                        ? 'bg-amber-50/70 border-amber-200 text-amber-900'
+                        : 'bg-sky-50/70 border-sky-200 text-sky-900'
                     }`}
                   >
-                    <div className="flex items-center justify-between gap-2">
-                      <div className="flex items-center gap-1.5 font-semibold text-xs">
-                        {diag.severity === 'error' ? (
-                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-                        ) : diag.severity === 'warning' ? (
-                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                        ) : (
-                          <Info className="w-4 h-4 text-sky-600 shrink-0" />
-                        )}
-                        <span className="font-mono text-[11px] bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700 shadow-2xs">
-                          Line {diag.line}:{diag.column}
-                        </span>
-                        <span className="uppercase text-[10px] tracking-wider opacity-75 font-mono">
-                          {diag.ruleId}
-                        </span>
-                      </div>
-
-                      <span
-                        className={`text-[10px] font-bold uppercase px-1.5 py-0.5 rounded ${
-                          diag.severity === 'error'
-                            ? 'bg-rose-100 text-rose-700 border border-rose-200'
-                            : diag.severity === 'warning'
-                            ? 'bg-amber-100 text-amber-700 border border-amber-200'
-                            : 'bg-sky-100 text-sky-700 border border-sky-200'
-                        }`}
-                      >
-                        {diag.severity}
+                    <div className="flex items-center gap-2 font-semibold text-xs">
+                      {diag.severity === 'error' ? (
+                        <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                      ) : diag.severity === 'warning' ? (
+                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                      ) : (
+                        <Info className="w-4 h-4 text-sky-600 shrink-0" />
+                      )}
+                      <span className="font-mono text-[11px] bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700 shadow-2xs font-semibold">
+                        Line {diag.line}
                       </span>
                     </div>
 
-                    <p className="text-slate-800 text-xs leading-relaxed font-sans">{diag.message}</p>
-
-                    {diag.suggestedFix && (
-                      <div className="flex items-center justify-between gap-2 mt-1 pt-2 border-t border-slate-200/60">
-                        <span className="text-slate-600 text-[11px] italic font-sans truncate">
-                          Suggested: {diag.suggestedFix}
-                        </span>
-                        <button
-                          type="button"
-                          onClick={() => handleApplyQuickFix(diag.suggestedFix, diag.line)}
-                          className="flex items-center gap-1 px-2.5 py-1 bg-[#fdf0f6] hover:bg-[#fce4f0] text-[#c70066] font-semibold rounded text-[11px] shrink-0 border border-[#f8b4d9] transition-colors shadow-2xs"
-                        >
-                          <Wrench className="w-3 h-3 text-[#e20074]" />
-                          <span>Quick Fix</span>
-                        </button>
-                      </div>
-                    )}
+                    <p className="text-slate-800 text-xs leading-relaxed font-sans pl-6">
+                      {diag.message}
+                    </p>
                   </div>
                 ))}
               </div>
@@ -616,13 +830,13 @@ FROM "SCHEMA"."FACT_SALES";`;
             {/* Diagnostics Rule Verification Summary Checklist */}
             <div className="mt-4 p-3.5 bg-slate-50 rounded-xl border border-slate-200 space-y-2">
               <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-800">
-                <ShieldCheck className="w-3.5 h-3.5 text-[#e20074]" />
+                <CheckCheck className="w-3.5 h-3.5 text-[#e20074]" />
                 <span>Standard HANA Verification Engine</span>
               </div>
               <ul className="text-[11px] text-slate-600 space-y-1 pl-1">
                 <li className="flex items-center gap-1.5">
                   <span className="text-emerald-600 font-bold">✓</span>
-                  <span>Safe Mode: SELECT-only enforcement</span>
+                  <span>SELECT query analytical structure verified</span>
                 </li>
                 <li className="flex items-center gap-1.5">
                   <span className="text-emerald-600 font-bold">✓</span>
@@ -650,8 +864,8 @@ FROM "SCHEMA"."FACT_SALES";`;
             type="button"
             id="prev-node-step-btn"
             disabled={!prevNode}
-            onClick={() => prevNode && onNavigateNode(prevNode.id)}
-            className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] disabled:opacity-30 disabled:pointer-events-none rounded text-xs transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm"
+            onClick={() => prevNode && handleAttemptNavigate(prevNode.id)}
+            className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] disabled:opacity-30 disabled:pointer-events-none rounded text-xs transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
           >
             <ChevronLeft className="w-3.5 h-3.5" />
             <span>Prev Query ({prevNode ? `Step ${prevNode.executionOrder}` : 'Start'})</span>
@@ -661,8 +875,8 @@ FROM "SCHEMA"."FACT_SALES";`;
             type="button"
             id="next-node-step-btn"
             disabled={!nextNode}
-            onClick={() => nextNode && onNavigateNode(nextNode.id)}
-            className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] disabled:opacity-30 disabled:pointer-events-none rounded text-xs transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm"
+            onClick={() => nextNode && handleAttemptNavigate(nextNode.id)}
+            className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] disabled:opacity-30 disabled:pointer-events-none rounded text-xs transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
           >
             <span>Next Query ({nextNode ? `Step ${nextNode.executionOrder}` : 'End'})</span>
             <ChevronRight className="w-3.5 h-3.5" />
@@ -678,6 +892,73 @@ FROM "SCHEMA"."FACT_SALES";`;
           <span className="hidden sm:inline text-[#c70066] font-semibold">SAP HANA SQL 2.0 / Cloud</span>
         </div>
       </footer>
+
+      {/* Unsaved Changes Confirmation Warning Modal */}
+      {showUnsavedModal && (
+        <div className="fixed inset-0 z-60 bg-slate-900/60 backdrop-blur-xs flex items-center justify-center p-4 animate-fadeIn">
+          <div className="bg-white rounded-2xl shadow-2xl border border-slate-200 w-full max-w-md overflow-hidden animate-scaleIn">
+            <div className="p-5 border-b border-slate-100 flex items-start justify-between bg-amber-50/60">
+              <div className="flex items-center gap-3">
+                <div className="p-2.5 bg-amber-100 text-amber-700 rounded-xl border border-amber-200 shrink-0">
+                  <AlertTriangle className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-bold text-slate-900 text-sm">Unsaved Changes</h3>
+                  <p className="text-xs text-slate-500 mt-0.5">
+                    Step #{currentNode.executionOrder}: {currentNode.name}
+                  </p>
+                </div>
+              </div>
+              <button
+                type="button"
+                onClick={handleCancelUnsavedModal}
+                className="p-1 hover:bg-slate-200/60 rounded-md text-slate-400 hover:text-slate-700 transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="p-5 text-xs text-slate-600 space-y-2 leading-relaxed">
+              <p>
+                You have unsaved changes in this SQL query node. If you leave without saving, your recent edits will be lost.
+              </p>
+              <p className="text-slate-500 italic">
+                Would you like to save your changes before leaving, or discard them?
+              </p>
+            </div>
+
+            <div className="p-4 bg-slate-50 border-t border-slate-100 flex items-center justify-end gap-2 text-xs">
+              <button
+                type="button"
+                id="discard-unsaved-btn"
+                onClick={handleConfirmDiscardAndProceed}
+                className="px-3 py-1.5 bg-white hover:bg-rose-50 text-rose-700 hover:text-rose-800 border border-slate-200 hover:border-rose-300 rounded-lg font-medium transition-colors cursor-pointer"
+              >
+                Discard & Leave
+              </button>
+
+              <button
+                type="button"
+                id="cancel-unsaved-btn"
+                onClick={handleCancelUnsavedModal}
+                className="px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 border border-slate-200 rounded-lg font-medium transition-colors cursor-pointer"
+              >
+                Keep Editing
+              </button>
+
+              <button
+                type="button"
+                id="save-and-proceed-btn"
+                onClick={handleConfirmSaveAndProceed}
+                className="px-4 py-1.5 bg-[#e20074] hover:bg-[#c70066] text-white rounded-lg font-semibold shadow-sm transition-colors cursor-pointer flex items-center gap-1.5"
+              >
+                <Save className="w-3.5 h-3.5" />
+                <span>Save & Continue</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
