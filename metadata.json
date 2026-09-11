@@ -1,0 +1,6 @@
+{
+  "name": "SAP HANA SQL Flow Studio",
+  "description": "Visual flow process editor for sequence of SAP HANA SQL queries with full-size SQL editor and real-time syntax validation",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
