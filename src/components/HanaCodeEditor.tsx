@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { SyntaxDiagnostic } from '../types';
 import {
   HANA_KEYWORDS,
@@ -6,24 +6,16 @@ import {
   HANA_BUILTIN_FUNCTIONS,
 } from '../utils/hanaSqlValidator';
 import {
-  SAP_COMMON_TABLES,
-  SAP_COMMON_COLUMNS,
-  KEYWORDS_LIST,
-  AutocompleteItem,
-} from '../utils/sqlSnippets';
-import {
   AlertCircle,
   AlertTriangle,
   Search,
   X,
-  Sparkles,
 } from 'lucide-react';
 
 interface HanaCodeEditorProps {
   value: string;
   onChange: (value: string) => void;
   diagnostics: SyntaxDiagnostic[];
-  onFormat?: () => void;
   readOnly?: boolean;
   onCursorChange?: (line: number, col: number) => void;
   onUndo?: () => void;
@@ -53,15 +45,9 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
   const [replaceTerm, setReplaceTerm] = useState('');
   const [highlightedLine, setHighlightedLine] = useState<number | null>(null);
 
-  // Autocomplete state
-  const [showAutocomplete, setShowAutocomplete] = useState(false);
-  const [autocompleteFilter, setAutocompleteFilter] = useState('');
-  const [selectedIndex, setSelectedIndex] = useState(0);
-  const [wordRange, setWordRange] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
-
   const lines = value.split('\n');
 
-  // Effect to scroll to target line when clicked from diagnostics or external trigger
+  // Effect to scroll to target line when clicked from diagnostics
   useEffect(() => {
     if (targetLine && targetLine > 0 && textareaRef.current) {
       const linesArr = value.split('\n');
@@ -124,94 +110,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
     }
   };
 
-  // Build autocomplete suggestions based on current word prefix
-  const suggestions: AutocompleteItem[] = useMemo(() => {
-    if (!showAutocomplete) return [];
-    const query = autocompleteFilter.trim().toLowerCase();
-
-    const items: AutocompleteItem[] = [];
-
-    // 1. SAP Tables matching query
-    SAP_COMMON_TABLES.forEach((t) => {
-      if (!query || t.label.toLowerCase().includes(query) || t.detail.toLowerCase().includes(query)) {
-        items.push({
-          label: t.label,
-          type: 'table',
-          detail: t.detail,
-          insertText: t.label,
-        });
-      }
-    });
-
-    // 3. SAP Columns matching query
-    SAP_COMMON_COLUMNS.forEach((c) => {
-      if (!query || c.label.toLowerCase().includes(query) || c.detail.toLowerCase().includes(query)) {
-        items.push({
-          label: c.label,
-          type: 'column',
-          detail: c.detail,
-          insertText: c.label,
-        });
-      }
-    });
-
-    // 4. HANA Built-in functions matching query
-    Array.from(HANA_BUILTIN_FUNCTIONS).forEach((f) => {
-      if (!query || f.toLowerCase().includes(query)) {
-        items.push({
-          label: f,
-          type: 'function',
-          detail: 'HANA Built-in Function',
-          insertText: `${f}()`,
-        });
-      }
-    });
-
-    // 5. Standard SQL Keywords matching query
-    KEYWORDS_LIST.forEach((kw) => {
-      if (!query || kw.toLowerCase().includes(query)) {
-        items.push({
-          label: kw,
-          type: 'keyword',
-          detail: 'SQL Keyword',
-          insertText: kw,
-        });
-      }
-    });
-
-    // Limit suggestions list for performance
-    return items.slice(0, 15);
-  }, [showAutocomplete, autocompleteFilter]);
-
-  // Handle inserting an autocomplete suggestion
-  const insertSuggestion = useCallback(
-    (item: AutocompleteItem) => {
-      if (!textareaRef.current) return;
-      const currentVal = value;
-      const { start, end } = wordRange;
-
-      const before = currentVal.substring(0, start);
-      const after = currentVal.substring(end);
-      const inserted = item.insertText;
-
-      const updatedVal = before + inserted + after;
-      onChange(updatedVal);
-
-      setShowAutocomplete(false);
-
-      // Reset cursor position after insert
-      setTimeout(() => {
-        if (textareaRef.current) {
-          const newPos = start + inserted.length;
-          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = newPos;
-          textareaRef.current.focus();
-        }
-      }, 0);
-    },
-    [value, wordRange, onChange]
-  );
-
-  const updateCursorAndCheckAutocomplete = () => {
+  const updateCursorPos = () => {
     if (!textareaRef.current) return;
     const text = textareaRef.current.value;
     const selStart = textareaRef.current.selectionStart;
@@ -225,70 +124,17 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
     if (onCursorChange) {
       onCursorChange(line, col);
     }
-
-    // Determine current word prefix for autocomplete
-    const currentLineText = lineArr[lineArr.length - 1];
-    const match = currentLineText.match(/[a-zA-Z0-9_"\.]*$/);
-    if (match && match[0].length >= 1) {
-      const word = match[0];
-      const wordStart = selStart - word.length;
-      setWordRange({ start: wordStart, end: selStart });
-      setAutocompleteFilter(word);
-      setShowAutocomplete(true);
-      setSelectedIndex(0);
-    } else {
-      setShowAutocomplete(false);
-    }
   };
 
-  // Handle Tab, Autocomplete Navigation, Shortcuts in editor
+  // Handle Shortcuts & Tab in editor (No autocomplete)
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     const isMac = navigator.platform.toUpperCase().indexOf('MAC') >= 0;
     const modifier = isMac ? e.metaKey : e.ctrlKey;
 
-    // Ctrl+Space trigger autocomplete explicitly
-    if (e.ctrlKey && e.code === 'Space') {
+    if (modifier && e.key.toLowerCase() === 'f') {
       e.preventDefault();
-      if (!textareaRef.current) return;
-      const selStart = textareaRef.current.selectionStart;
-      const sub = value.substring(0, selStart);
-      const lineArr = sub.split('\n');
-      const currentLineText = lineArr[lineArr.length - 1];
-      const match = currentLineText.match(/[a-zA-Z0-9_"\.]*$/);
-      const word = match ? match[0] : '';
-      const wordStart = selStart - word.length;
-
-      setWordRange({ start: wordStart, end: selStart });
-      setAutocompleteFilter(word);
-      setShowAutocomplete(true);
-      setSelectedIndex(0);
+      setShowSearch((prev) => !prev);
       return;
-    }
-
-    // Keyboard navigation inside Autocomplete dropdown
-    if (showAutocomplete && suggestions.length > 0) {
-      if (e.key === 'ArrowDown') {
-        e.preventDefault();
-        setSelectedIndex((prev) => (prev + 1) % suggestions.length);
-        return;
-      }
-      if (e.key === 'ArrowUp') {
-        e.preventDefault();
-        setSelectedIndex((prev) => (prev - 1 + suggestions.length) % suggestions.length);
-        return;
-      }
-      if (e.key === 'Enter' || e.key === 'Tab') {
-        e.preventDefault();
-        if (suggestions[selectedIndex]) {
-          insertSuggestion(suggestions[selectedIndex]);
-        }
-        return;
-      }
-      if (e.key === 'Escape') {
-        e.preventDefault();
-        setShowAutocomplete(false);
-        return;
-      }
     }
 
     if (modifier && e.key.toLowerCase() === 'z') {
@@ -325,41 +171,40 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
           textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + 4;
         }
       }, 0);
-    } else if (e.key === 'f' && modifier) {
-      e.preventDefault();
-      setShowSearch((prev) => !prev);
     }
   };
 
-  const handleSearchReplace = (replaceAll = false) => {
+  // Search & Replace helper
+  const handleExecuteReplace = () => {
     if (!searchTerm) return;
-    if (replaceAll) {
-      const regex = new RegExp(escapeRegex(searchTerm), 'g');
-      onChange(value.replace(regex, replaceTerm));
-    } else {
-      const idx = value.indexOf(searchTerm);
-      if (idx !== -1) {
-        const newValue = value.substring(0, idx) + replaceTerm + value.substring(idx + searchTerm.length);
-        onChange(newValue);
-      }
-    }
+    const regex = new RegExp(searchTerm, 'g');
+    const replaced = value.replace(regex, replaceTerm);
+    onChange(replaced);
   };
 
-  function escapeRegex(string: string) {
-    return string.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  }
+  // Tokenizer with Distinct Colors for Tables & Columns
+  const renderHighlightedLine = (line: string, lineIdx: number) => {
+    const lineNum = lineIdx + 1;
+    const isHighlighted = highlightedLine === lineNum;
+    const lineDiags = diagnosticsByLine.get(lineNum) || [];
+    const hasError = lineDiags.some((d) => d.severity === 'error');
+    const hasWarning = lineDiags.some((d) => d.severity === 'warning');
 
-  // Tokenize line for color highlights
-  const renderHighlightedLine = (line: string, lineIndex: number) => {
-    const lineNum = lineIndex + 1;
-    const lineDiagnostics = diagnosticsByLine.get(lineNum) || [];
-    const hasError = lineDiagnostics.some((d) => d.severity === 'error');
-    const hasWarning = lineDiagnostics.some((d) => d.severity === 'warning');
-
-    if (line === '') {
+    if (line.length === 0) {
       return (
-        <div key={lineIndex} className="h-6 leading-6">
-          &nbsp;
+        <div
+          key={lineIdx}
+          className={`h-6 leading-6 transition-colors ${
+            isHighlighted
+              ? 'bg-[#e20074]/15 border-l-2 border-[#e20074]'
+              : hasError
+              ? 'bg-rose-50/70 border-l-2 border-rose-500'
+              : hasWarning
+              ? 'bg-amber-50/70 border-l-2 border-amber-500'
+              : ''
+          }`}
+        >
+          {'\u00A0'}
         </div>
       );
     }
@@ -371,11 +216,25 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
       // Single line comments
       if (line.startsWith('--', i) || line.startsWith('//', i)) {
         tokens.push(
-          <span key={i} className="text-slate-400 italic font-mono">
+          <span key={i} className="text-slate-400 italic font-mono bg-slate-50/60 px-1 rounded-xs">
             {line.substring(i)}
           </span>
         );
         break;
+      }
+
+      // Block comments /* ... */
+      if (line.startsWith('/*', i)) {
+        let blockEnd = line.indexOf('*/', i + 2);
+        if (blockEnd === -1) blockEnd = line.length;
+        else blockEnd += 2;
+        tokens.push(
+          <span key={i} className="text-slate-400 italic font-mono bg-slate-50/60 px-1 rounded-xs">
+            {line.substring(i, blockEnd)}
+          </span>
+        );
+        i = blockEnd;
+        continue;
       }
 
       // Single quote string literals
@@ -386,7 +245,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
             if (line[strEnd + 1] === "'") {
               strEnd += 2;
             } else {
-              strEnd++;
+              strEnd += 1;
               break;
             }
           } else {
@@ -394,7 +253,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
           }
         }
         tokens.push(
-          <span key={i} className="text-emerald-700 font-mono">
+          <span key={i} className="text-[#047857] font-semibold font-mono bg-emerald-50/60 px-0.5 rounded-xs border border-emerald-200/40">
             {line.substring(i, strEnd)}
           </span>
         );
@@ -402,17 +261,17 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
         continue;
       }
 
-      // Double quote identifiers "SCHEMA"."TABLE"
+      // Double quote identifiers "SCHEMA"."TABLE" or "COLUMN_NAME" (Tables & Columns in Quotes)
       if (line[i] === '"') {
         let idEnd = i + 1;
         while (idEnd < line.length && line[idEnd] !== '"') {
           idEnd++;
         }
-        if (idEnd < line.length && line[idEnd] === '"') {
+        if (idEnd < line.length) {
           idEnd++;
         }
         tokens.push(
-          <span key={i} className="text-sky-800 font-semibold font-mono">
+          <span key={i} className="text-[#0284c7] font-bold font-mono bg-sky-50 border border-sky-200/70 rounded-xs px-1 shadow-2xs">
             {line.substring(i, idEnd)}
           </span>
         );
@@ -420,14 +279,14 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
         continue;
       }
 
-      // Parameters like :IP_START_DATE
+      // Parameters :PARAM or ?
       if (line[i] === ':' && /[A-Za-z_]/.test(line[i + 1] || '')) {
         let pEnd = i + 1;
         while (pEnd < line.length && /[A-Za-z0-9_]/.test(line[pEnd])) {
           pEnd++;
         }
         tokens.push(
-          <span key={i} className="text-amber-700 font-bold font-mono bg-amber-50 px-0.5 rounded border border-amber-200">
+          <span key={i} className="text-amber-800 font-bold font-mono bg-amber-100 px-1 rounded-xs border border-amber-300">
             {line.substring(i, pEnd)}
           </span>
         );
@@ -438,11 +297,11 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
       // Numbers
       if (/[0-9]/.test(line[i])) {
         let numEnd = i;
-        while (numEnd < line.length && /[0-9.]/.test(line[numEnd])) {
+        while (numEnd < line.length && /[0-9\.]/.test(line[numEnd])) {
           numEnd++;
         }
         tokens.push(
-          <span key={i} className="text-indigo-600 font-mono">
+          <span key={i} className="text-[#7c3aed] font-semibold font-mono">
             {line.substring(i, numEnd)}
           </span>
         );
@@ -450,7 +309,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
         continue;
       }
 
-      // Words (Keywords, Functions, Types, Identifiers)
+      // Words (Keywords, Functions, Types, Tables & Columns)
       if (/[A-Za-z_]/.test(line[i])) {
         let wordEnd = i;
         while (wordEnd < line.length && /[A-Za-z0-9_]/.test(line[wordEnd])) {
@@ -461,25 +320,26 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
 
         if (HANA_KEYWORDS.has(upper)) {
           tokens.push(
-            <span key={i} className="text-[#e20074] font-bold font-mono">
+            <span key={i} className="text-[#e20074] font-bold font-mono tracking-tight">
               {word}
             </span>
           );
         } else if (HANA_BUILTIN_FUNCTIONS.has(upper)) {
           tokens.push(
-            <span key={i} className="text-indigo-700 font-semibold font-mono">
+            <span key={i} className="text-[#b45309] font-bold font-mono">
               {word}
             </span>
           );
         } else if (HANA_DATA_TYPES.has(upper)) {
           tokens.push(
-            <span key={i} className="text-teal-700 font-medium font-mono">
+            <span key={i} className="text-[#0f766e] font-semibold font-mono">
               {word}
             </span>
           );
         } else {
+          // Table or Column names (unquoted identifiers) - Vibrant Royal Blue
           tokens.push(
-            <span key={i} className="text-slate-800 font-mono">
+            <span key={i} className="text-[#1d4ed8] font-bold font-mono">
               {word}
             </span>
           );
@@ -489,131 +349,75 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
         continue;
       }
 
-      // Other punctuation / whitespace
-      tokens.push(
-        <span key={i} className="text-slate-600 font-mono">
-          {line[i]}
-        </span>
-      );
+      // Punctuation & whitespace
+      tokens.push(<span key={i}>{line[i]}</span>);
       i++;
     }
 
-    const isTargetHighlighted = lineNum === highlightedLine;
-
     return (
       <div
-        key={lineIndex}
-        className={`h-6 leading-6 whitespace-pre font-mono relative transition-colors ${
-          isTargetHighlighted
-            ? 'bg-[#e20074]/20 border-l-4 border-[#e20074] ring-1 ring-[#e20074]/50'
+        key={lineIdx}
+        className={`h-6 leading-6 whitespace-pre transition-colors ${
+          isHighlighted
+            ? 'bg-[#e20074]/15 border-l-2 border-[#e20074]'
             : hasError
-            ? 'bg-rose-50'
+            ? 'bg-rose-50/60 border-l-2 border-rose-500'
             : hasWarning
-            ? 'bg-amber-50'
-            : lineNum === cursorPos.line
-            ? 'bg-blue-50/70 border-l-2 border-blue-500'
+            ? 'bg-amber-50/60 border-l-2 border-amber-500'
             : ''
         }`}
       >
         {tokens}
-        {hasError && (
-          <div className="absolute bottom-0 left-0 right-0 h-0.5 border-b border-dashed border-rose-500 pointer-events-none" />
-        )}
-        {hasWarning && !hasError && (
-          <div className="absolute bottom-0 left-0 right-0 h-0.5 border-b border-dashed border-amber-500 pointer-events-none" />
-        )}
       </div>
     );
   };
 
   return (
-    <div className="relative flex flex-col h-full w-full bg-white text-slate-800 font-mono rounded-lg border border-slate-200 hover:border-slate-300 overflow-hidden shadow-sm transition-colors">
-      {/* Top Code Editor Control Toolbar */}
-      <div className="bg-slate-800 text-slate-200 border-b border-slate-700 px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 select-none z-20">
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Autocomplete Trigger Info */}
-          <button
-            type="button"
-            onClick={() => {
-              setShowAutocomplete(true);
-              textareaRef.current?.focus();
-            }}
-            className="flex items-center gap-1 px-2 py-1 bg-slate-900 hover:bg-slate-950 text-indigo-300 rounded-md text-[10px] font-mono border border-indigo-500/30 cursor-pointer"
-            title="Press Ctrl+Space anytime while typing for SQL autocomplete"
-          >
-            <Sparkles className="w-3 h-3 text-indigo-400" />
-            <span>Autocomplete (Ctrl+Space)</span>
-          </button>
-        </div>
-
-        <div className="flex items-center gap-3">
-          {/* Search Toggle */}
-          <button
-            type="button"
-            onClick={() => setShowSearch((prev) => !prev)}
-            className={`p-1 rounded text-[11px] font-medium transition-colors cursor-pointer ${
-              showSearch ? 'bg-[#e20074] text-white' : 'text-slate-300 hover:bg-slate-700 hover:text-white'
-            }`}
-            title="Search & Replace (Ctrl+F)"
-          >
-            <Search className="w-3.5 h-3.5" />
-          </button>
-
-          {/* Line & Column Indicator */}
-          <span className="text-[11px] font-mono text-slate-400">
-            Ln {cursorPos.line}, Col {cursorPos.col}
-          </span>
-        </div>
-      </div>
-
+    <div className="relative flex flex-col h-full w-full bg-white text-slate-800 font-mono overflow-hidden transition-colors">
       {/* Quick Search & Replace Bar */}
       {showSearch && (
         <div className="flex items-center gap-2 p-2 bg-slate-50 border-b border-slate-200 text-xs text-slate-700 z-20">
-          <Search className="w-3.5 h-3.5 text-[#e20074] shrink-0" />
+          <Search className="w-3.5 h-3.5 text-slate-400 shrink-0" />
           <input
             type="text"
-            placeholder="Find in SQL..."
+            placeholder="Search..."
             value={searchTerm}
             onChange={(e) => setSearchTerm(e.target.value)}
-            className="bg-white border border-slate-200 focus:border-[#e20074] rounded px-2 py-1 text-xs text-slate-800 focus:outline-none w-44 shadow-sm"
+            className="px-2 py-1 bg-white border border-slate-300 rounded text-xs outline-none focus:border-[#e20074] w-36 sm:w-48"
           />
           <input
             type="text"
-            placeholder="Replace with..."
+            placeholder="Replace..."
             value={replaceTerm}
             onChange={(e) => setReplaceTerm(e.target.value)}
-            className="bg-white border border-slate-200 focus:border-[#e20074] rounded px-2 py-1 text-xs text-slate-800 focus:outline-none w-44 shadow-sm"
+            className="px-2 py-1 bg-white border border-slate-300 rounded text-xs outline-none focus:border-[#e20074] w-36 sm:w-48"
           />
           <button
             type="button"
-            onClick={() => handleSearchReplace(false)}
-            className="px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 border border-slate-200 hover:border-[#f8b4d9] rounded font-medium transition-colors shadow-sm cursor-pointer"
-          >
-            Replace
-          </button>
-          <button
-            type="button"
-            onClick={() => handleSearchReplace(true)}
-            className="px-2.5 py-1 bg-[#e20074] hover:bg-[#c70066] text-white rounded font-medium transition-colors shadow-sm cursor-pointer"
+            onClick={handleExecuteReplace}
+            className="px-2.5 py-1 bg-white hover:bg-slate-100 text-slate-700 rounded border border-slate-300 text-xs font-semibold cursor-pointer"
           >
             Replace All
           </button>
           <button
             type="button"
             onClick={() => setShowSearch(false)}
-            className="p-1 hover:bg-slate-200 rounded text-slate-500 hover:text-slate-700 ml-auto cursor-pointer"
+            className="p-1 hover:bg-slate-200 rounded text-slate-400 hover:text-slate-600 transition-colors ml-auto cursor-pointer"
+            title="Close search"
           >
-            <X className="w-4 h-4" />
+            <X className="w-3.5 h-3.5" />
           </button>
         </div>
       )}
 
-      {/* Editor Body */}
-      <div className="relative flex-1 flex overflow-hidden">
+      {/* Editor Main Canvas */}
+      <div className="relative flex-1 flex overflow-hidden w-full h-full bg-white">
         {/* Line Numbers Gutter */}
         <div
           ref={lineNumbersRef}
-          className="w-14 shrink-0 bg-slate-50 border-r border-slate-200 py-3 select-none text-right font-mono text-xs overflow-hidden z-10"
+          aria-hidden="true"
+          className="w-12 sm:w-14 py-3 bg-slate-50/80 border-r border-slate-200 text-right select-none text-xs font-mono overflow-hidden shrink-0"
+          style={{ lineHeight: '1.5rem' }}
         >
           {lines.map((_, idx) => {
             const lineNum = idx + 1;
@@ -663,10 +467,10 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
             value={value}
             onChange={(e) => {
               onChange(e.target.value);
-              updateCursorAndCheckAutocomplete();
+              updateCursorPos();
             }}
-            onKeyUp={updateCursorAndCheckAutocomplete}
-            onClick={updateCursorAndCheckAutocomplete}
+            onKeyUp={updateCursorPos}
+            onClick={updateCursorPos}
             onScroll={handleScroll}
             onKeyDown={handleKeyDown}
             readOnly={readOnly}
@@ -677,70 +481,6 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
             className="absolute inset-0 w-full h-full py-3 px-4 text-xs font-mono bg-transparent text-transparent caret-[#e20074] resize-none outline-none overflow-auto z-10 selection:bg-[#e20074]/20 selection:text-transparent"
             style={{ tabSize: 4, lineHeight: '1.5rem' }}
           />
-
-          {/* Floating Autocomplete Popover Overlay */}
-          {showAutocomplete && suggestions.length > 0 && (
-            <div
-              className="absolute left-6 bottom-4 z-30 w-80 max-h-64 bg-slate-900 border border-slate-700 rounded-xl shadow-2xl overflow-hidden flex flex-col font-sans"
-              style={{
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.5), 0 10px 10px -5px rgba(0, 0, 0, 0.3)',
-              }}
-            >
-              <div className="px-3 py-1.5 bg-slate-800 border-b border-slate-700 flex items-center justify-between text-[11px] text-slate-300 font-bold">
-                <span className="flex items-center gap-1.5 text-indigo-300">
-                  <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-                  <span>SQL Suggestions ({suggestions.length})</span>
-                </span>
-                <span className="text-[10px] text-slate-400 font-mono">Use ↑↓ & Enter/Tab</span>
-              </div>
-
-              <div className="flex-1 overflow-y-auto p-1 space-y-0.5 custom-scrollbar">
-                {suggestions.map((item, idx) => {
-                  const isSelected = idx === selectedIndex;
-                  return (
-                    <div
-                      key={idx}
-                      onClick={() => insertSuggestion(item)}
-                      onMouseEnter={() => setSelectedIndex(idx)}
-                      className={`p-2 rounded-lg flex items-start justify-between gap-2 transition-colors cursor-pointer ${
-                        isSelected
-                          ? 'bg-indigo-600 text-white shadow-sm'
-                          : 'hover:bg-slate-800 text-slate-200'
-                      }`}
-                    >
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-1.5">
-                          <span className="font-mono font-bold text-xs truncate">
-                            {item.label}
-                          </span>
-                        </div>
-                        {item.detail && (
-                          <div className={`text-[10px] truncate ${isSelected ? 'text-indigo-100' : 'text-slate-400'}`}>
-                            {item.detail}
-                          </div>
-                        )}
-                      </div>
-
-                      {/* Item Type Badge */}
-                      <span
-                        className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded shrink-0 ${
-                          item.type === 'snippet'
-                            ? 'bg-pink-500/30 text-pink-200 border border-pink-400/30'
-                            : item.type === 'keyword'
-                            ? 'bg-indigo-500/30 text-indigo-200 border border-indigo-400/30'
-                            : item.type === 'function'
-                            ? 'bg-emerald-500/30 text-emerald-200 border border-emerald-400/30'
-                            : 'bg-slate-700 text-slate-300'
-                        }`}
-                      >
-                        {item.type}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

@@ -1,6 +1,6 @@
 {
   "name": "SAP HANA SQL SELECT Editor",
-  "description": "Real-time SAP HANA Cloud SQL SELECT statement editor with autocomplete, snippet library, and syntax diagnostics.",
+  "description": "Real-time SAP HANA Cloud SQL SELECT statement editor with syntax highlighting, formatting, and live diagnostics.",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }
