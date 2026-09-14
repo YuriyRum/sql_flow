@@ -162,6 +162,24 @@ export const PipelineSimulationModal: React.FC<PipelineSimulationModalProps> = (
       timer = setTimeout(() => {
         const hasError = node.validationSummary && !node.validationSummary.isValid;
 
+        // Check if node is deactivated
+        if (!node.enabled) {
+          const skipLog: ExecutionLog = {
+            id: `log-skip-${node.id}-${step.iteration}-${Date.now()}`,
+            timestamp: new Date().toLocaleTimeString(),
+            nodeId: node.id,
+            nodeName: node.name,
+            level: 'info',
+            message: `[DEACTIVATED / SKIPPED] Query Step #${node.executionOrder} (${node.name}) is turned off. Bypassed execution.`,
+            durationMs: 0,
+            rowsAffected: 0,
+          };
+          setLogs((prev) => [...prev, skipLog]);
+          setCompletedSteps((prev) => [...prev, step]);
+          setCurrentStepIndex((prev) => prev + 1);
+          return;
+        }
+
         // Check if in strict mode and encountering a cycle
         if (executionMode === 'strict' && step.isCycleStep && cycleAnalysis.hasCycle) {
           const cycleLog: ExecutionLog = {
@@ -439,9 +457,11 @@ export const PipelineSimulationModal: React.FC<PipelineSimulationModalProps> = (
                       <div>
                         <div className="flex items-center gap-2">
                           <span className="font-semibold text-sm text-slate-900">{node.name}</span>
-                          <span className="font-mono text-[10px] uppercase px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded border border-slate-200">
-                            {node.queryType}
-                          </span>
+                          {!node.enabled && (
+                            <span className="text-[10px] font-semibold bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded border border-slate-300 font-mono">
+                              Deactivated (Skipped)
+                            </span>
+                          )}
                           {step.isCycleStep && (
                             <span className="text-[10px] font-semibold bg-amber-100 text-amber-900 px-1.5 py-0.5 rounded border border-amber-300 flex items-center gap-1 font-mono">
                               <Repeat className="w-2.5 h-2.5 text-amber-700" />

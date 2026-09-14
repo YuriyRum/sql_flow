@@ -25,10 +25,7 @@ export const SAMPLE_PIPELINES: FlowPipeline[] = [
         targetSchema: 'STAGE',
         targetTable: 'V_SALES_ORDERS_RAW',
         inputTables: ['"SAP_S4HANA"."VBAK"'],
-        parameters: [
-          { name: 'IP_START_DATE', type: 'DATE', defaultValue: "'2026-09-01'", description: 'Ingestion starting date' },
-          { name: 'IP_SALES_ORG', type: 'NVARCHAR(4)', defaultValue: "'1010'", description: 'Target sales organization' }
-        ],
+        parameters: [],
         executionOrder: 1,
         status: 'success',
         enabled: true,
@@ -44,8 +41,8 @@ export const SAMPLE_PIPELINES: FlowPipeline[] = [
     TO_DECIMAL(IFNULL(v."MWSBP", 0.00), 15, 2) AS "TAX_AMOUNT",
     CURRENT_UTCTIMESTAMP AS "EXTRACTION_TIMESTAMP"
 FROM "SAP_S4HANA"."VBAK" AS v
-WHERE v."ERDAT" >= :IP_START_DATE
-  AND v."VKORG" = :IP_SALES_ORG
+WHERE v."ERDAT" >= '2026-09-01'
+  AND v."VKORG" = '1010'
 ORDER BY v."ERDAT" DESC;`,
         simulatedOutput: {
           columns: ['SALES_ORDER_ID', 'SALES_ORG', 'DOC_DATE', 'CUSTOMER_ID', 'CURRENCY', 'NET_AMOUNT', 'TAX_AMOUNT', 'EXTRACTION_TIMESTAMP'],
@@ -59,6 +56,7 @@ ORDER BY v."ERDAT" DESC;`,
           memoryUsageMb: 2.8,
           timestamp: '2026-09-10 14:00:01'
         },
+        scheduleId: 'SCHED-EVERY-5M',
         validationSummary: { isValid: true, errors: 0, warnings: 0 }
       },
       {
@@ -69,10 +67,7 @@ ORDER BY v."ERDAT" DESC;`,
         targetSchema: 'STAGE',
         targetTable: 'V_SALES_CUSTOMER_ENRICHED',
         inputTables: ['"SAP_S4HANA"."VBAK"', '"SAP_S4HANA"."KNA1"'],
-        parameters: [
-          { name: 'IP_START_DATE', type: 'DATE', defaultValue: "'2026-09-01'", description: 'Batch ingestion start date' },
-          { name: 'IP_SALES_ORG', type: 'NVARCHAR(4)', defaultValue: "'1010'", description: 'Target sales organization code' }
-        ],
+        parameters: [],
         executionOrder: 2,
         status: 'success',
         enabled: true,
@@ -98,8 +93,8 @@ ORDER BY v."ERDAT" DESC;`,
 FROM "SAP_S4HANA"."VBAK" AS v
 LEFT OUTER JOIN "SAP_S4HANA"."KNA1" AS cust 
     ON v."KUNNR" = cust."KUNNR"
-WHERE v."ERDAT" >= :IP_START_DATE
-  AND v."VKORG" = :IP_SALES_ORG
+WHERE v."ERDAT" >= '2026-09-01'
+  AND v."VKORG" = '1010'
 ORDER BY "DOC_DATE" DESC;`,
         simulatedOutput: {
           columns: ['SALES_ORDER_ID', 'CUSTOMER_NAME', 'COUNTRY_CODE', 'CITY', 'CURRENCY', 'NET_AMOUNT', 'NORMALIZED_EUR_AMOUNT'],
@@ -113,6 +108,7 @@ ORDER BY "DOC_DATE" DESC;`,
           memoryUsageMb: 5.2,
           timestamp: '2026-09-10 14:00:05'
         },
+        scheduleId: 'SCHED-HOURLY',
         validationSummary: { isValid: true, errors: 0, warnings: 0 }
       },
       {
@@ -167,6 +163,7 @@ ORDER BY item."NETWR" DESC;`,
           memoryUsageMb: 9.6,
           timestamp: '2026-09-10 14:00:12'
         },
+        scheduleId: 'SCHED-DAILY-6AM',
         validationSummary: { isValid: true, errors: 0, warnings: 0 }
       },
       {
@@ -177,9 +174,7 @@ ORDER BY item."NETWR" DESC;`,
         targetSchema: 'ANALYTICS',
         targetTable: 'V_AGG_REGIONAL_SALES',
         inputTables: ['"SAP_S4HANA"."VBAP"', '"SAP_S4HANA"."VBAK"', '"SAP_S4HANA"."KNA1"', '"SAP_S4HANA"."MARA"'],
-        parameters: [
-          { name: 'IP_FISCAL_YEAR', type: 'INTEGER', defaultValue: '2026', description: 'Current reporting fiscal year' }
-        ],
+        parameters: [],
         executionOrder: 4,
         status: 'idle',
         enabled: true,
@@ -201,7 +196,7 @@ LEFT OUTER JOIN "SAP_S4HANA"."KNA1" AS cust
     ON head."KUNNR" = cust."KUNNR"
 LEFT OUTER JOIN "SAP_S4HANA"."MARA" AS mat 
     ON item."MATNR" = mat."MATNR"
-WHERE EXTRACT(YEAR FROM TO_DATE(head."ERDAT", 'YYYYMMDD')) = :IP_FISCAL_YEAR
+WHERE EXTRACT(YEAR FROM TO_DATE(head."ERDAT", 'YYYYMMDD')) = 2026
 GROUP BY cust."LAND1", mat."MTART"
 HAVING SUM(item."NETWR") > 0
 ORDER BY "TOTAL_REVENUE_EUR" DESC;`,
@@ -217,6 +212,7 @@ ORDER BY "TOTAL_REVENUE_EUR" DESC;`,
           memoryUsageMb: 6.4,
           timestamp: '2026-09-10 14:00:20'
         },
+        scheduleId: 'SCHED-MON-6AM',
         validationSummary: { isValid: true, errors: 0, warnings: 0 }
       },
       {
@@ -317,9 +313,9 @@ LIMIT 100;`,
     b."WAERS" AS "DOC_CURRENCY",
     b."HWAER" AS "LOCAL_CURRENCY"
 FROM "SAP_S4HANA"."BKPF" AS b
-WHERE b."BUKRS" = :IP_BUKRS
-  AND b."GJAHR" = :IP_GJAHR
-  AND b."MONAT" = :IP_MONAT
+WHERE b."BUKRS" = '1000'
+  AND b."GJAHR" = '2026'
+  AND b."MONAT" = '09'
   AND b."BSTAT" = '' -- Only posted non-parked documents
 ORDER BY b."BUDAT" DESC;`,
         simulatedOutput: {
@@ -343,10 +339,7 @@ ORDER BY b."BUDAT" DESC;`,
         targetSchema: 'FINANCE',
         targetTable: 'V_GL_BALANCES',
         inputTables: ['"SAP_S4HANA"."BKPF"', '"SAP_S4HANA"."BSEG"'],
-        parameters: [
-          { name: 'IP_BUKRS', type: 'NVARCHAR(4)', defaultValue: "'1000'", description: 'Company code' },
-          { name: 'IP_GJAHR', type: 'INTEGER', defaultValue: '2026', description: 'Fiscal Year' }
-        ],
+        parameters: [],
         executionOrder: 2,
         status: 'idle',
         enabled: true,
@@ -368,8 +361,8 @@ INNER JOIN "SAP_S4HANA"."BSEG" AS item
     ON h."BUKRS" = item."BUKRS"
    AND h."BELNR" = item."BELNR"
    AND h."GJAHR" = item."GJAHR"
-WHERE h."BUKRS" = :IP_BUKRS
-  AND h."GJAHR" = :IP_GJAHR
+WHERE h."BUKRS" = '1000'
+  AND h."GJAHR" = '2026'
 GROUP BY 
     h."BUKRS", 
     h."BELNR", 
@@ -396,10 +389,7 @@ ORDER BY ABS(SUM(CASE WHEN item."SHKZG" = 'S' THEN item."DMBTR" ELSE -item."DMBT
         targetSchema: 'FINANCE',
         targetTable: 'V_AUDIT_UNBALANCED_DOCS',
         inputTables: ['"SAP_S4HANA"."BKPF"', '"SAP_S4HANA"."BSEG"'],
-        parameters: [
-          { name: 'IP_BUKRS', type: 'NVARCHAR(4)', defaultValue: "'1000'", description: 'Company code' },
-          { name: 'IP_GJAHR', type: 'INTEGER', defaultValue: '2026', description: 'Fiscal Year' }
-        ],
+        parameters: [],
         executionOrder: 3,
         status: 'idle',
         enabled: true,
@@ -419,8 +409,8 @@ INNER JOIN "SAP_S4HANA"."BSEG" AS item
     ON h."BUKRS" = item."BUKRS"
    AND h."BELNR" = item."BELNR"
    AND h."GJAHR" = item."GJAHR"
-WHERE h."BUKRS" = :IP_BUKRS
-  AND h."GJAHR" = :IP_GJAHR
+WHERE h."BUKRS" = '1000'
+  AND h."GJAHR" = '2026'
 GROUP BY 
     h."BUKRS", 
     h."BELNR", 
@@ -445,10 +435,7 @@ ORDER BY ABS("VARIANCE_AMOUNT") DESC;`,
         targetSchema: 'FINANCE',
         targetTable: 'V_BALANCE_SHEET_CONSOLIDATED',
         inputTables: ['"SAP_S4HANA"."BKPF"', '"SAP_S4HANA"."BSEG"'],
-        parameters: [
-          { name: 'IP_BUKRS', type: 'NVARCHAR(4)', defaultValue: "'1000'", description: 'Company code' },
-          { name: 'IP_GJAHR', type: 'INTEGER', defaultValue: '2026', description: 'Fiscal Year' }
-        ],
+        parameters: [],
         executionOrder: 4,
         status: 'idle',
         enabled: true,
@@ -465,8 +452,8 @@ INNER JOIN "SAP_S4HANA"."BSEG" AS item
     ON h."BUKRS" = item."BUKRS"
    AND h."BELNR" = item."BELNR"
    AND h."GJAHR" = item."GJAHR"
-WHERE h."BUKRS" = :IP_BUKRS
-  AND h."GJAHR" = :IP_GJAHR
+WHERE h."BUKRS" = '1000'
+  AND h."GJAHR" = '2026'
 GROUP BY 
     h."BUKRS", 
     h."GJAHR";`,

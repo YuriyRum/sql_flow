@@ -13,6 +13,7 @@ export interface QueryParameter {
   name: string;
   type: string;
   defaultValue: string;
+  value?: string;
   description?: string;
 }
 
@@ -37,6 +38,36 @@ export interface SyntaxDiagnostic {
   codeSnippet?: string;
 }
 
+export type RecurrenceType =
+  | 'ALWAYS'
+  | 'EVERY_HOUR'
+  | 'EVERY_MONDAY'
+  | 'ONCE_PER_MONTH'
+  | 'AT_6AM'
+  | 'AT_6AM_MONDAY'
+  | 'EVERY_5_MIN'
+  | 'CUSTOM';
+
+export interface RecurrenceSchedule {
+  id: string; // Unique Schedule ID e.g. "SCHED-6AM-DAILY"
+  name: string; // Human readable name e.g. "Daily Morning Shift ETL"
+  description?: string;
+  type: RecurrenceType;
+  customCron?: string;
+  timeOfDay?: string; // "06:00"
+  daysOfWeek?: number[]; // [1] for Monday
+  dayOfMonth?: number; // 1 for 1st of month
+  intervalMinutes?: number;
+  timezone?: string;
+  maxRetries?: number;
+  timeoutSeconds?: number;
+  concurrencyPolicy?: 'SKIP' | 'QUEUE' | 'ALLOW_PARALLEL';
+  isSystemDefault?: boolean;
+  createdAt?: string;
+}
+
+export type ScheduleConfig = RecurrenceSchedule;
+
 export interface ValidationResult {
   isValid: boolean;
   errorCount: number;
@@ -59,7 +90,7 @@ export interface SQLNode {
   targetSchema?: string;
   targetTable?: string;
   inputTables: string[];
-  parameters: QueryParameter[];
+  parameters?: QueryParameter[];
   executionOrder: number;
   status: NodeStatus;
   enabled: boolean;
@@ -73,6 +104,8 @@ export interface SQLNode {
     errors: number;
     warnings: number;
   };
+  scheduleId?: string; // Reference to independent RecurrenceSchedule ID
+  schedule?: ScheduleConfig;
 }
 
 export interface FlowEdge {
@@ -91,6 +124,7 @@ export interface FlowPipeline {
   updatedAt: string;
   nodes: SQLNode[];
   edges: FlowEdge[];
+  schedules?: RecurrenceSchedule[];
   author?: string;
   targetHanaVersion?: string;
 }

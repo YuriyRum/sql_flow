@@ -40,14 +40,23 @@ export const ExportModal: React.FC<ExportModalProps> = ({ pipeline, isOpen, onCl
 
     sortedNodes.forEach((node) => {
       const isCyclic = cycleAnalysis.cycleNodeIds.includes(node.id);
+      const isDeactivated = !node.enabled;
       script += `-- -------------------------------------------------------------------------\n`;
-      script += `-- Step ${node.executionOrder}: ${node.name} [Type: ${node.queryType}]${isCyclic ? ' [IN CYCLE LOOP]' : ''}\n`;
+      script += `-- Step ${node.executionOrder}: ${node.name} [Type: ${node.queryType}]${isCyclic ? ' [IN CYCLE LOOP]' : ''}${isDeactivated ? ' [STATUS: DEACTIVATED - BYPASSED]' : ''}\n`;
       script += `-- Description: ${node.description}\n`;
       if (isCyclic) {
         script += `-- Loop Participant: Executes iteratively in circular feedback path\n`;
       }
-      script += `-- -------------------------------------------------------------------------\n`;
-      script += `${node.sqlContent.trim().endsWith(';') ? node.sqlContent.trim() : node.sqlContent.trim() + ';'}\n\n`;
+      if (isDeactivated) {
+        script += `-- Status: Statement is turned off in the pipeline flow\n`;
+        script += `-- -------------------------------------------------------------------------\n`;
+        script += `/* [DEACTIVATED STATEMENT - REMOVE COMMENTS TO ACTIVATE]\n`;
+        script += `${node.sqlContent.trim().endsWith(';') ? node.sqlContent.trim() : node.sqlContent.trim() + ';'}\n`;
+        script += `*/\n\n`;
+      } else {
+        script += `-- -------------------------------------------------------------------------\n`;
+        script += `${node.sqlContent.trim().endsWith(';') ? node.sqlContent.trim() : node.sqlContent.trim() + ';'}\n\n`;
+      }
     });
 
     script += `-- =========================================================================\n`;
@@ -80,14 +89,28 @@ export const ExportModal: React.FC<ExportModalProps> = ({ pipeline, isOpen, onCl
     proc += `        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'Pipeline execution error in SP_${procName}';\n`;
     proc += `    END;\n\n`;
 
+    const formatNodeForProc = (node: typeof sortedNodes[0], indent = '    ') => {
+      let out = `${indent}-- Step ${node.executionOrder}: ${node.name}${!node.enabled ? ' [DEACTIVATED]' : ''}\n`;
+      if (!node.enabled) {
+        out += `${indent}/* [DEACTIVATED STEP IN FLOW]\n`;
+        out += node.sqlContent
+          .split('\n')
+          .map((line) => `${indent}${line}`)
+          .join('\n');
+        out += `\n${indent}*/\n\n`;
+      } else {
+        out += node.sqlContent
+          .split('\n')
+          .map((line) => `${indent}${line}`)
+          .join('\n');
+        out += `\n\n`;
+      }
+      return out;
+    };
+
     if (!cycleAnalysis.hasCycle) {
       sortedNodes.forEach((node) => {
-        proc += `    -- Step ${node.executionOrder}: ${node.name}\n`;
-        const indentedSql = node.sqlContent
-          .split('\n')
-          .map((line) => `    ${line}`)
-          .join('\n');
-        proc += `${indentedSql}\n\n`;
+        proc += formatNodeForProc(node, '    ');
       });
     } else {
       // Split into pre-cycle, in-cycle, post-cycle
@@ -102,12 +125,7 @@ export const ExportModal: React.FC<ExportModalProps> = ({ pipeline, isOpen, onCl
 
       // Pre-cycle
       preCycleNodes.forEach((node) => {
-        proc += `    -- Step ${node.executionOrder}: ${node.name} (Initialization)\n`;
-        const indentedSql = node.sqlContent
-          .split('\n')
-          .map((line) => `    ${line}`)
-          .join('\n');
-        proc += `${indentedSql}\n\n`;
+        proc += formatNodeForProc(node, '    ');
       });
 
       // While loop for cycle nodes
@@ -116,24 +134,14 @@ export const ExportModal: React.FC<ExportModalProps> = ({ pipeline, isOpen, onCl
       proc += `    -- =====================================================================\n`;
       proc += `    WHILE LV_LOOP_INDEX <= IP_MAX_LOOP_ITERATIONS DO\n`;
       inCycleNodes.forEach((node) => {
-        proc += `        -- Step ${node.executionOrder}: ${node.name} (Iteration Loop Step)\n`;
-        const indentedSql = node.sqlContent
-          .split('\n')
-          .map((line) => `        ${line}`)
-          .join('\n');
-        proc += `${indentedSql}\n\n`;
+        proc += formatNodeForProc(node, '        ');
       });
       proc += `        LV_LOOP_INDEX := LV_LOOP_INDEX + 1;\n`;
       proc += `    END WHILE;\n\n`;
 
       // Post-cycle
       postCycleNodes.forEach((node) => {
-        proc += `    -- Step ${node.executionOrder}: ${node.name} (Finalization)\n`;
-        const indentedSql = node.sqlContent
-          .split('\n')
-          .map((line) => `    ${line}`)
-          .join('\n');
-        proc += `${indentedSql}\n\n`;
+        proc += formatNodeForProc(node, '    ');
       });
     }
 
