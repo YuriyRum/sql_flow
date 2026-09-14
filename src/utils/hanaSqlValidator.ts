@@ -780,28 +780,6 @@ function validateSingleProjectionItem(item: Token[], diagnostics: SyntaxDiagnost
     }
 
     // Check for random gibberish / invalid identifiers (e.g. `dsdsfsdf`)
-    if (tok.type === 'IDENTIFIER') {
-      const isKnownFuncOrType =
-        HANA_BUILTIN_FUNCTIONS.has(tok.value.toUpperCase()) ||
-        HANA_DATA_TYPES.has(tok.value.toUpperCase()) ||
-        HANA_KEYWORDS.has(tok.value.toUpperCase());
-
-      const isGibberish =
-        !isKnownFuncOrType &&
-        (/[bcdfghjklmnpqrstvwxyz]{4,}/i.test(tok.raw) ||
-          /^[^aeiouy0-9_]{3,}$/i.test(tok.raw) ||
-          (/^[a-z]{6,}$/.test(tok.raw) && !['string', 'number', 'boolean', 'status', 'amount', 'result', 'total', 'count', 'value', 'price', 'quantity', 'category', 'description', 'comment', 'timestamp', 'customer', 'company', 'address', 'region', 'country', 'active', 'posted', 'closed', 'opened', 'created', 'updated'].includes(tok.raw.toLowerCase())));
-
-      if (isGibberish) {
-        diagnostics.push({
-          line: tok.line,
-          column: tok.column,
-          message: `Syntax Error: Unrecognized column or identifier '${tok.raw}'.`,
-          severity: 'error',
-          ruleId: 'HANA_UNRECOGNIZED_IDENTIFIER',
-        });
-      }
-    }
   }
 
   // If item has 3 or more identifiers/literals in a row without operators or dots (e.g. `col1 col2 col3` or `"A" "B" "C"`)
@@ -1650,38 +1628,11 @@ function checkHanaSpecificSyntax(
 }
 
 function checkFunctionsAndIdentifiers(
-  tokens: Token[],
+  _tokens: Token[],
   sql: string,
   lines: string[],
   diagnostics: SyntaxDiagnostic[]
 ) {
-  // Check tokens for random gibberish identifiers anywhere in the query
-  for (const t of tokens) {
-    if (t.type === 'IDENTIFIER') {
-      const isKnown =
-        HANA_BUILTIN_FUNCTIONS.has(t.value.toUpperCase()) ||
-        HANA_DATA_TYPES.has(t.value.toUpperCase()) ||
-        HANA_KEYWORDS.has(t.value.toUpperCase());
-
-      if (!isKnown) {
-        // Check for common keyboard mash / gibberish patterns like dsdsfsdf, asdfgh, etc.
-        const isGibberish =
-          (/[bcdfghjklmnpqrstvwxyz]{4,}/i.test(t.raw) || /^[^aeiouy0-9_]{3,}$/i.test(t.raw)) &&
-          !['SCH', 'PRD', 'DEV', 'QAS', 'TXT', 'DOC', 'NUM', 'QTY', 'SRC', 'DST', 'HDR', 'ITM'].includes(t.raw.toUpperCase());
-
-        if (isGibberish) {
-          diagnostics.push({
-            line: t.line,
-            column: t.column,
-            message: `Syntax Error: Unrecognized column or identifier '${t.raw}'.`,
-            severity: 'error',
-            ruleId: 'HANA_UNRECOGNIZED_IDENTIFIER',
-          });
-        }
-      }
-    }
-  }
-
   // Check for common typo functions like ISNULL (SQL Server) instead of IFNULL (HANA)
   const isnullMatch = sql.match(/\bISNULL\s*\(/i);
   if (isnullMatch) {
@@ -1798,50 +1749,506 @@ function findLineForToken(lines: string[], token: string): number {
   return 1;
 }
 
+interface FormatToken {
+  type: 'KEYWORD' | 'FUNCTION' | 'IDENTIFIER' | 'STRING' | 'QUOTED_ID' | 'NUMBER' | 'SYMBOL' | 'COMMENT_LINE' | 'COMMENT_BLOCK' | 'NEWLINE';
+  value: string;
+  upper: string;
+}
+
+function tokenizeForFormatting(sql: string): FormatToken[] {
+  const tokens: FormatToken[] = [];
+  let pos = 0;
+  const len = sql.length;
+
+  while (pos < len) {
+    const char = sql[pos];
+    const nextChar = pos + 1 < len ? sql[pos + 1] : '';
+
+    if (char === '\n') {
+      tokens.push({ type: 'NEWLINE', value: '\n', upper: '\n' });
+      pos++;
+      continue;
+    }
+    if (/\s/.test(char)) {
+      pos++;
+      continue;
+    }
+
+    // Single line comments (-- or //)
+    if ((char === '-' && nextChar === '-') || (char === '/' && nextChar === '/')) {
+      let end = pos;
+      while (end < len && sql[end] !== '\n') {
+        end++;
+      }
+      const commentVal = sql.substring(pos, end);
+      tokens.push({ type: 'COMMENT_LINE', value: commentVal, upper: commentVal });
+      pos = end;
+      continue;
+    }
+
+    // Block comments (/* ... */)
+    if (char === '/' && nextChar === '*') {
+      let end = pos + 2;
+      while (end < len - 1 && !(sql[end] === '*' && sql[end + 1] === '/')) {
+        end++;
+      }
+      end = Math.min(len, end + 2);
+      const commentVal = sql.substring(pos, end);
+      tokens.push({ type: 'COMMENT_BLOCK', value: commentVal, upper: commentVal });
+      pos = end;
+      continue;
+    }
+
+    // String literals ('...')
+    if (char === "'") {
+      let end = pos + 1;
+      while (end < len) {
+        if (sql[end] === "'") {
+          if (end + 1 < len && sql[end + 1] === "'") {
+            end += 2;
+          } else {
+            end++;
+            break;
+          }
+        } else {
+          end++;
+        }
+      }
+      const strVal = sql.substring(pos, end);
+      tokens.push({ type: 'STRING', value: strVal, upper: strVal });
+      pos = end;
+      continue;
+    }
+
+    // Quoted identifiers ("...")
+    if (char === '"') {
+      let end = pos + 1;
+      while (end < len) {
+        if (sql[end] === '"') {
+          if (end + 1 < len && sql[end + 1] === '"') {
+            end += 2;
+          } else {
+            end++;
+            break;
+          }
+        } else {
+          end++;
+        }
+      }
+      const idVal = sql.substring(pos, end);
+      tokens.push({ type: 'QUOTED_ID', value: idVal, upper: idVal });
+      pos = end;
+      continue;
+    }
+
+    // Parameters (:PARAM)
+    if (char === ':' && /[A-Za-z_]/.test(nextChar)) {
+      let end = pos + 1;
+      while (end < len && /[A-Za-z0-9_]/.test(sql[end])) {
+        end++;
+      }
+      const paramVal = sql.substring(pos, end);
+      tokens.push({ type: 'IDENTIFIER', value: paramVal, upper: paramVal.toUpperCase() });
+      pos = end;
+      continue;
+    }
+
+    // Multi-char operators
+    const twoChars = sql.substring(pos, pos + 2);
+    if (['||', '<=', '>=', '!=', '<>'].includes(twoChars)) {
+      tokens.push({ type: 'SYMBOL', value: twoChars, upper: twoChars });
+      pos += 2;
+      continue;
+    }
+
+    // Numbers
+    if (/[0-9]/.test(char) || (char === '.' && /[0-9]/.test(nextChar))) {
+      let end = pos + 1;
+      let hasDot = char === '.';
+      while (end < len) {
+        if (/[0-9]/.test(sql[end])) {
+          end++;
+        } else if (sql[end] === '.' && !hasDot) {
+          hasDot = true;
+          end++;
+        } else {
+          break;
+        }
+      }
+      const numVal = sql.substring(pos, end);
+      tokens.push({ type: 'NUMBER', value: numVal, upper: numVal });
+      pos = end;
+      continue;
+    }
+
+    // Words (keywords, identifiers, functions)
+    if (/[A-Za-z_]/.test(char)) {
+      let end = pos;
+      while (end < len && /[A-Za-z0-9_]/.test(sql[end])) {
+        end++;
+      }
+      const wordVal = sql.substring(pos, end);
+      const upperWord = wordVal.toUpperCase();
+
+      let lookAhead = end;
+      while (lookAhead < len && /\s/.test(sql[lookAhead])) {
+        lookAhead++;
+      }
+      const isFunctionCall = lookAhead < len && sql[lookAhead] === '(';
+
+      if (HANA_KEYWORDS.has(upperWord)) {
+        tokens.push({ type: 'KEYWORD', value: upperWord, upper: upperWord });
+      } else if (HANA_BUILTIN_FUNCTIONS.has(upperWord) || isFunctionCall) {
+        const fnName = HANA_BUILTIN_FUNCTIONS.has(upperWord) ? upperWord : wordVal;
+        tokens.push({ type: 'FUNCTION', value: fnName, upper: upperWord });
+      } else if (HANA_DATA_TYPES.has(upperWord)) {
+        tokens.push({ type: 'KEYWORD', value: upperWord, upper: upperWord });
+      } else {
+        tokens.push({ type: 'IDENTIFIER', value: wordVal, upper: upperWord });
+      }
+
+      pos = end;
+      continue;
+    }
+
+    // Single-char symbols
+    tokens.push({ type: 'SYMBOL', value: char, upper: char });
+    pos++;
+  }
+
+  return tokens;
+}
+
 /**
- * SAP HANA SQL Formatter
+ * SAP HANA Best-Practices SQL Formatter
  */
 export function formatHanaSql(sql: string): string {
-  if (!sql.trim()) return sql;
+  if (!sql || !sql.trim()) return sql;
 
-  const majorKeywords = [
-    'SELECT', 'FROM', 'WHERE', 'GROUP BY', 'HAVING', 'ORDER BY',
-    'LIMIT', 'OFFSET', 'UNION ALL', 'UNION', 'EXCEPT', 'INTERSECT',
-    'INSERT INTO', 'UPSERT INTO', 'UPDATE', 'DELETE FROM', 'MERGE INTO',
-    'USING', 'WHEN MATCHED', 'WHEN NOT MATCHED',
-    'CREATE COLUMN TABLE', 'CREATE ROW TABLE', 'CREATE TABLE', 'CREATE VIEW',
-    'DO BEGIN', 'END;', 'DECLARE'
-  ];
+  const rawTokens = tokenizeForFormatting(sql);
+  if (rawTokens.length === 0) return sql;
 
-  let formatted = sql;
-  formatted = formatted.replace(/[ \t]+/g, ' ');
+  // Combine multi-word keywords
+  const tokens: FormatToken[] = [];
+  let i = 0;
 
-  HANA_KEYWORDS.forEach((kw) => {
-    const regex = new RegExp(`\\b${kw}\\b`, 'gi');
-    formatted = formatted.replace(regex, kw);
-  });
+  while (i < rawTokens.length) {
+    const cur = rawTokens[i];
+    const next = i + 1 < rawTokens.length ? rawTokens[i + 1] : null;
+    const third = i + 2 < rawTokens.length ? rawTokens[i + 2] : null;
 
-  majorKeywords.forEach((kw) => {
-    const regex = new RegExp(`\\s*\\b${kw.replace(/\s+/g, '\\s+')}\\b\\s*`, 'gi');
-    formatted = formatted.replace(regex, `\n${kw} `);
-  });
+    if (cur.type === 'KEYWORD' && next && next.type === 'KEYWORD' && third && third.type === 'KEYWORD') {
+      const triple = `${cur.upper} ${next.upper} ${third.upper}`;
+      if (
+        [
+          'LEFT OUTER JOIN',
+          'RIGHT OUTER JOIN',
+          'FULL OUTER JOIN',
+          'CREATE COLUMN TABLE',
+          'CREATE ROW TABLE',
+        ].includes(triple)
+      ) {
+        tokens.push({ type: 'KEYWORD', value: triple, upper: triple });
+        i += 3;
+        continue;
+      }
+    }
 
-  const joinTypes = ['INNER JOIN', 'LEFT JOIN', 'LEFT OUTER JOIN', 'RIGHT JOIN', 'RIGHT OUTER JOIN', 'FULL JOIN', 'FULL OUTER JOIN', 'CROSS JOIN', 'JOIN'];
-  joinTypes.forEach((join) => {
-    const regex = new RegExp(`\\s*\\b${join.replace(/\s+/g, '\\s+')}\\b\\s*`, 'gi');
-    formatted = formatted.replace(regex, `\n  ${join} `);
-  });
+    if (cur.type === 'KEYWORD' && next && next.type === 'KEYWORD') {
+      const double = `${cur.upper} ${next.upper}`;
+      if (
+        [
+          'GROUP BY',
+          'ORDER BY',
+          'INNER JOIN',
+          'LEFT JOIN',
+          'RIGHT JOIN',
+          'FULL JOIN',
+          'CROSS JOIN',
+          'INSERT INTO',
+          'UPSERT INTO',
+          'DELETE FROM',
+          'MERGE INTO',
+          'WHEN MATCHED',
+          'WHEN NOT MATCHED',
+          'UNION ALL',
+          'CREATE TABLE',
+          'CREATE VIEW',
+          'DO BEGIN',
+          'PARTITION BY',
+          'NULLS FIRST',
+          'NULLS LAST',
+          'UNBOUNDED PRECEDING',
+          'CURRENT ROW',
+        ].includes(double)
+      ) {
+        tokens.push({ type: 'KEYWORD', value: double, upper: double });
+        i += 2;
+        continue;
+      }
+    }
 
-  formatted = formatted.replace(/\nWHERE\s+([\s\S]+?)(?=\n(?:GROUP BY|HAVING|ORDER BY|LIMIT|$))/gi, (match) => {
-    return match
-      .replace(/\s+AND\s+/gi, '\n  AND ')
-      .replace(/\s+OR\s+/gi, '\n  OR ');
-  });
+    tokens.push(cur);
+    i++;
+  }
 
-  const finalLines = formatted
-    .split('\n')
-    .map((l) => l.trimEnd())
-    .filter((l, idx, arr) => !(l === '' && arr[idx - 1] === ''));
+  const lines: string[] = [];
+  let currentLine = '';
+  let indentLevel = 0;
+  let inSelectProjection = false;
+  let parenDepth = 0;
+  let inCase = false;
 
-  return finalLines.join('\n').trim();
+  const indentStr = () => '  '.repeat(Math.max(0, indentLevel));
+
+  const flushLine = () => {
+    const trimmed = currentLine.trim();
+    if (trimmed.length > 0) {
+      lines.push(indentStr() + trimmed);
+    }
+    currentLine = '';
+  };
+
+  const isMajorClause = (tok: FormatToken) => {
+    if (tok.type !== 'KEYWORD') return false;
+    return [
+      'WITH',
+      'SELECT',
+      'FROM',
+      'JOIN',
+      'LEFT JOIN',
+      'RIGHT JOIN',
+      'INNER JOIN',
+      'FULL JOIN',
+      'CROSS JOIN',
+      'LEFT OUTER JOIN',
+      'RIGHT OUTER JOIN',
+      'FULL OUTER JOIN',
+      'WHERE',
+      'GROUP BY',
+      'HAVING',
+      'ORDER BY',
+      'LIMIT',
+      'OFFSET',
+      'UNION',
+      'UNION ALL',
+      'EXCEPT',
+      'INTERSECT',
+      'INSERT INTO',
+      'UPSERT INTO',
+      'UPDATE',
+      'SET',
+      'DELETE FROM',
+      'MERGE INTO',
+      'USING',
+      'WHEN MATCHED',
+      'WHEN NOT MATCHED',
+      'CREATE TABLE',
+      'CREATE COLUMN TABLE',
+      'CREATE ROW TABLE',
+      'CREATE VIEW',
+      'DO BEGIN',
+    ].includes(tok.upper);
+  };
+
+  for (let idx = 0; idx < tokens.length; idx++) {
+    const tok = tokens[idx];
+    const prev = idx > 0 ? tokens[idx - 1] : null;
+    const next = idx + 1 < tokens.length ? tokens[idx + 1] : null;
+
+    if (tok.type === 'COMMENT_LINE' || tok.type === 'COMMENT_BLOCK') {
+      flushLine();
+      lines.push(indentStr() + tok.value);
+      continue;
+    }
+
+    if (tok.type === 'NEWLINE') {
+      continue;
+    }
+
+    // Major clauses
+    if (isMajorClause(tok) && (parenDepth === 0 || inSelectProjection)) {
+      flushLine();
+
+      if (tok.upper === 'SELECT') {
+        inSelectProjection = true;
+        currentLine = tok.upper;
+        flushLine();
+        indentLevel++;
+      } else if (tok.upper === 'FROM') {
+        if (inSelectProjection) {
+          indentLevel = Math.max(0, indentLevel - 1);
+          inSelectProjection = false;
+        }
+        currentLine = tok.upper;
+      } else if (tok.upper.includes('JOIN')) {
+        currentLine = tok.upper;
+      } else if (tok.upper === 'WHERE' || tok.upper === 'HAVING') {
+        currentLine = tok.upper;
+        flushLine();
+        indentLevel++;
+      } else if (tok.upper === 'GROUP BY' || tok.upper === 'ORDER BY' || tok.upper === 'SET') {
+        currentLine = tok.upper;
+        flushLine();
+        indentLevel++;
+      } else {
+        currentLine = tok.upper;
+      }
+
+      continue;
+    }
+
+    // Logical AND / OR in clauses
+    if (
+      tok.type === 'KEYWORD' &&
+      (tok.upper === 'AND' || tok.upper === 'OR') &&
+      parenDepth === 0
+    ) {
+      flushLine();
+      currentLine = tok.upper + ' ';
+      continue;
+    }
+
+    // SELECT projection top-level commas
+    if (
+      tok.type === 'SYMBOL' &&
+      tok.value === ',' &&
+      inSelectProjection &&
+      parenDepth === 0
+    ) {
+      currentLine += ',';
+      flushLine();
+      continue;
+    }
+
+    // Other top-level commas
+    if (tok.type === 'SYMBOL' && tok.value === ',' && parenDepth === 0) {
+      currentLine += ',';
+      if (currentLine.length > 40) {
+        flushLine();
+      } else {
+        currentLine += ' ';
+      }
+      continue;
+    }
+
+    // CASE WHEN THEN ELSE END
+    if (tok.type === 'KEYWORD' && tok.upper === 'CASE') {
+      if (currentLine.trim().length > 0) {
+        currentLine += ' ';
+      }
+      currentLine += 'CASE';
+      flushLine();
+      indentLevel++;
+      inCase = true;
+      continue;
+    }
+
+    if (tok.type === 'KEYWORD' && tok.upper === 'WHEN' && inCase) {
+      flushLine();
+      currentLine = 'WHEN ';
+      continue;
+    }
+
+    if (tok.type === 'KEYWORD' && tok.upper === 'THEN' && inCase) {
+      currentLine += ' THEN ';
+      continue;
+    }
+
+    if (tok.type === 'KEYWORD' && tok.upper === 'ELSE' && inCase) {
+      flushLine();
+      currentLine = 'ELSE ';
+      continue;
+    }
+
+    if (tok.type === 'KEYWORD' && tok.upper === 'END') {
+      if (inCase) {
+        indentLevel = Math.max(0, indentLevel - 1);
+        inCase = false;
+      }
+      flushLine();
+      currentLine = 'END';
+      if (next && next.type === 'KEYWORD' && next.upper === 'AS') {
+        // Keep alias on same line
+      } else {
+        flushLine();
+      }
+      continue;
+    }
+
+    // Parentheses
+    if (tok.type === 'SYMBOL' && tok.value === '(') {
+      parenDepth++;
+      if (next && next.type === 'KEYWORD' && next.upper === 'SELECT') {
+        currentLine += ' (';
+        flushLine();
+        indentLevel++;
+      } else {
+        currentLine += '(';
+      }
+      continue;
+    }
+
+    if (tok.type === 'SYMBOL' && tok.value === ')') {
+      if (parenDepth > 0) parenDepth--;
+      if (prev && prev.type === 'KEYWORD' && isMajorClause(prev)) {
+        indentLevel = Math.max(0, indentLevel - 1);
+        flushLine();
+        currentLine = ')';
+      } else {
+        currentLine += ')';
+      }
+      continue;
+    }
+
+    // Semicolon
+    if (tok.type === 'SYMBOL' && tok.value === ';') {
+      currentLine += ';';
+      flushLine();
+      if (inSelectProjection) {
+        indentLevel = Math.max(0, indentLevel - 1);
+        inSelectProjection = false;
+      }
+      continue;
+    }
+
+    // Dot notation
+    if (tok.type === 'SYMBOL' && tok.value === '.') {
+      currentLine = currentLine.trimEnd() + '.';
+      continue;
+    }
+
+    if (prev && prev.type === 'SYMBOL' && prev.value === '.') {
+      currentLine += tok.value;
+      continue;
+    }
+
+    // Function call formatting
+    if (tok.type === 'FUNCTION') {
+      if (currentLine.length > 0 && !currentLine.endsWith(' ') && !currentLine.endsWith('(')) {
+        currentLine += ' ';
+      }
+      currentLine += tok.value;
+      continue;
+    }
+
+    // Spacing
+    if (currentLine.length > 0) {
+      const lastChar = currentLine[currentLine.length - 1];
+      if (lastChar !== '(' && lastChar !== '.' && tok.value !== ',') {
+        currentLine += ' ';
+      }
+    }
+
+    currentLine += tok.value;
+  }
+
+  flushLine();
+
+  const finalResult = lines
+    .filter((line, idx, arr) => !(line.trim() === '' && arr[idx - 1]?.trim() === ''))
+    .join('\n')
+    .trim();
+
+  return finalResult;
 }
