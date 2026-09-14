@@ -14,6 +14,9 @@ import {
   ArrowUpRight,
   PanelRightClose,
   PanelRightOpen,
+  WrapText,
+  ChevronDown,
+  Check,
 } from 'lucide-react';
 
 export interface FullSizeSqlEditorProps {
@@ -30,26 +33,7 @@ export interface FullSizeSqlEditorProps {
   onDeleteNode?: (nodeId: string) => void;
 }
 
-const FALLBACK_SQL = `-- SAP HANA SQL SELECT Query
-SELECT 
-    v."SALES_DOCUMENT",
-    v."COMPANY_CODE",
-    v."CUSTOMER_ID",
-    v."ORDER_DATE",
-    COUNT(*) AS "TOTAL_ITEMS",
-    SUM(p."NET_AMOUNT") AS "TOTAL_NET_AMOUNT"
-FROM "SAP_S4HANA"."VBAK" AS v
-INNER JOIN "SAP_S4HANA"."VBAP" AS p
-    ON v."SALES_DOCUMENT" = p."SALES_DOCUMENT"
-WHERE v."ORDER_DATE" >= ADD_MONTHS(CURRENT_DATE, -12)
-    AND v."STATUS" = 'A'
-GROUP BY 
-    v."SALES_DOCUMENT",
-    v."COMPANY_CODE",
-    v."CUSTOMER_ID",
-    v."ORDER_DATE"
-ORDER BY "TOTAL_NET_AMOUNT" DESC;
-`;
+const FALLBACK_SQL = '';
 
 export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
   initialSql,
@@ -57,7 +41,7 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
   node,
   onSaveNode,
 }) => {
-  const startingSql = initialSql ?? node?.sqlContent ?? FALLBACK_SQL;
+  const startingSql = initialSql !== undefined ? initialSql : (node?.sqlContent ?? FALLBACK_SQL);
   const [sqlContent, setSqlContent] = useState<string>(startingSql);
   const [validation, setValidation] = useState<ValidationResult>(() => validateHanaSql(startingSql));
   const [cursorPos, setCursorPos] = useState({ line: 1, col: 1 });
@@ -79,10 +63,50 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
 
+  // Editor screen width & formatting options
+  const editorAreaRef = useRef<HTMLDivElement>(null);
+  const [editorWidth, setEditorWidth] = useState<number>(800);
+  const [fitToWidth, setFitToWidth] = useState<boolean>(false);
+  const [showFormatMenu, setShowFormatMenu] = useState<boolean>(false);
+  const formatMenuRef = useRef<HTMLDivElement>(null);
+
+  // Calculate screen width in monospace characters (~7.225px each)
+  // Accounting for gutter (~54px), padding (~32px), scrollbar safety (~18px)
+  const screenWidthChars = Math.max(45, Math.floor((editorWidth - 104) / 7.225));
+
   const updateUndoRedoState = useCallback(() => {
     setCanUndo(historyIndexRef.current > 0);
     setCanRedo(historyIndexRef.current < historyRef.current.length - 1);
   }, []);
+
+  // Measure editor container width dynamically
+  useEffect(() => {
+    if (!editorAreaRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        if (entry.contentRect.width > 0) {
+          setEditorWidth(entry.contentRect.width);
+        }
+      }
+    });
+    observer.observe(editorAreaRef.current);
+    return () => observer.disconnect();
+  }, []);
+
+  // Close format menu on click outside
+  useEffect(() => {
+    const handleClickOutside = (e: MouseEvent) => {
+      if (formatMenuRef.current && !formatMenuRef.current.contains(e.target as Node)) {
+        setShowFormatMenu(false);
+      }
+    };
+    if (showFormatMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener('mousedown', handleClickOutside);
+    };
+  }, [showFormatMenu]);
 
   // Update when initialSql changes externally
   useEffect(() => {
@@ -92,10 +116,11 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
       setValidation(validateHanaSql(initialSql));
       historyRef.current = [initialSql];
       historyIndexRef.current = 0;
-      updateUndoRedoState();
+      setCanUndo(false);
+      setCanRedo(false);
       setSaveSuccess(false);
     }
-  }, [initialSql, updateUndoRedoState]);
+  }, [initialSql]);
 
   // Save handler
   const handleSave = useCallback(() => {
@@ -174,18 +199,42 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
     }
   }, [handleSqlChange, updateUndoRedoState]);
 
-  // Format SQL Action
-  const handleFormatSql = useCallback(() => {
-    const formatted = formatHanaSql(sqlContent);
-    handleSqlChange(formatted);
-  }, [sqlContent, handleSqlChange]);
+  // Format SQL Action (supports standard HANA format and fitting to screen width)
+  const handleFormatSql = useCallback(
+    (overrideFit?: boolean, customWidth?: number) => {
+      const shouldFit = overrideFit !== undefined ? overrideFit : fitToWidth;
+      const targetWidth = customWidth || screenWidthChars;
+      const formatted = formatHanaSql(sqlContent, {
+        fitToWidth: shouldFit,
+        maxLineWidth: targetWidth,
+      });
+      handleSqlChange(formatted);
+      setShowFormatMenu(false);
+    },
+    [fitToWidth, screenWidthChars, sqlContent, handleSqlChange]
+  );
+
+  // Toggle Fit to Screen Width mode
+  const handleToggleFitToWidth = useCallback(() => {
+    setFitToWidth((prev) => {
+      const nextVal = !prev;
+      handleFormatSql(nextVal);
+      return nextVal;
+    });
+  }, [handleFormatSql]);
+
+  // Stable cursor change handler avoiding infinite render loops
+  const handleCursorChange = useCallback((line: number, col: number) => {
+    setCursorPos((prev) => (prev.line === line && prev.col === col ? prev : { line, col }));
+  }, []);
 
   // Jump to specific line from diagnostics
   const handleJumpToLine = useCallback((line: number) => {
+    setTargetLine(line);
+  }, []);
+
+  const handleTargetLineHandled = useCallback(() => {
     setTargetLine(null);
-    setTimeout(() => {
-      setTargetLine(line);
-    }, 10);
   }, []);
 
   // Keyboard shortcuts (Ctrl+S, Ctrl+Z, Ctrl+Y, Shift+Alt+F)
@@ -289,17 +338,168 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
 
           <div className="h-4 w-px bg-slate-200 mx-1" />
 
-          {/* Format */}
-          <button
-            type="button"
-            id="format-btn"
-            onClick={handleFormatSql}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-100 text-slate-700 hover:text-[#e20074] rounded-md text-xs font-semibold transition-colors border border-slate-200 cursor-pointer"
-            title="Format SQL (Shift+Alt+F)"
-          >
-            <Code2 className="w-3.5 h-3.5 text-[#e20074]" />
-            <span>Format</span>
-          </button>
+          {/* Format Split Button & Fit to Screen Option */}
+          <div className="relative flex items-center" ref={formatMenuRef}>
+            <div className="flex items-center rounded-md border border-slate-200 bg-white shadow-2xs overflow-hidden">
+              {/* Format Button */}
+              <button
+                type="button"
+                id="format-btn"
+                onClick={() => handleFormatSql()}
+                className="flex items-center gap-1.5 px-3 py-1.5 hover:bg-slate-100 text-slate-700 hover:text-[#e20074] text-xs font-semibold transition-colors cursor-pointer"
+                title={`Format SQL (Shift+Alt+F) — ${
+                  fitToWidth ? `Fit to Screen (~${screenWidthChars} cols)` : 'Standard HANA Format'
+                }`}
+              >
+                <Code2 className="w-3.5 h-3.5 text-[#e20074]" />
+                <span>Format</span>
+                {fitToWidth && (
+                  <span className="text-[10px] text-[#e20074] bg-[#fdf0f6] px-1 py-0.2 rounded font-mono font-medium">
+                    Fit
+                  </span>
+                )}
+              </button>
+
+              <div className="h-4 w-px bg-slate-200" />
+
+              {/* Format Menu Trigger */}
+              <button
+                type="button"
+                id="format-menu-trigger"
+                onClick={() => setShowFormatMenu((prev) => !prev)}
+                className={`px-1.5 py-1.5 hover:bg-slate-100 text-slate-500 hover:text-slate-800 transition-colors cursor-pointer ${
+                  showFormatMenu ? 'bg-slate-100 text-slate-900' : ''
+                }`}
+                title="Formatter Options: Standard or Fit to Screen Width"
+              >
+                <ChevronDown className="w-3.5 h-3.5" />
+              </button>
+            </div>
+
+            {/* Quick Fit to Screen Width Toggle Button */}
+            <button
+              type="button"
+              id="fit-to-screen-toggle-btn"
+              onClick={handleToggleFitToWidth}
+              className={`ml-1.5 flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-medium transition-all border cursor-pointer ${
+                fitToWidth
+                  ? 'bg-[#fdf0f6] text-[#e20074] border-[#f8b4d9] font-semibold'
+                  : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200'
+              }`}
+              title={
+                fitToWidth
+                  ? `Fit content to screen width is ACTIVE (~${screenWidthChars} cols). Click to switch to standard format.`
+                  : `Fit content to screen width is OFF. Click to wrap SQL lines to fit editor screen width (~${screenWidthChars} cols).`
+              }
+            >
+              <WrapText className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Fit to Screen</span>
+              {fitToWidth ? (
+                <span className="w-1.5 h-1.5 rounded-full bg-[#e20074]" />
+              ) : null}
+            </button>
+
+            {/* Formatter Options Dropdown */}
+            {showFormatMenu && (
+              <div
+                id="format-options-menu"
+                className="absolute top-full left-0 mt-1.5 w-72 bg-white rounded-lg border border-slate-200 shadow-xl py-2 z-30 text-xs"
+              >
+                <div className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  Formatter Width Options
+                </div>
+
+                {/* Option 1: Standard Format */}
+                <button
+                  type="button"
+                  id="format-standard-option"
+                  onClick={() => {
+                    setFitToWidth(false);
+                    handleFormatSql(false);
+                  }}
+                  className="w-full text-left px-3 py-2 hover:bg-slate-50 flex items-start gap-2.5 transition-colors cursor-pointer"
+                >
+                  <div className="mt-0.5 w-4 shrink-0">
+                    {!fitToWidth && <Check className="w-3.5 h-3.5 text-[#e20074]" />}
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-800">Standard HANA Format</div>
+                    <div className="text-[11px] text-slate-500">
+                      Preserves extended lines; allows horizontal scrolling in editor.
+                    </div>
+                  </div>
+                </button>
+
+                {/* Option 2: Fit Content to Screen Width */}
+                <button
+                  type="button"
+                  id="format-fit-screen-option"
+                  onClick={() => {
+                    setFitToWidth(true);
+                    handleFormatSql(true, screenWidthChars);
+                  }}
+                  className="w-full text-left px-3 py-2 hover:bg-slate-50 flex items-start gap-2.5 transition-colors cursor-pointer"
+                >
+                  <div className="mt-0.5 w-4 shrink-0">
+                    {fitToWidth && <Check className="w-3.5 h-3.5 text-[#e20074]" />}
+                  </div>
+                  <div>
+                    <div className="font-semibold text-slate-800 flex items-center gap-1.5">
+                      <span>Fit to Screen Width</span>
+                      <span className="px-1.5 py-0.2 bg-slate-100 text-slate-600 rounded text-[10px] font-mono">
+                        ~{screenWidthChars} cols
+                      </span>
+                    </div>
+                    <div className="text-[11px] text-slate-500">
+                      Wraps JOINs, clauses, and expressions to fit visible screen width.
+                    </div>
+                  </div>
+                </button>
+
+                <div className="my-1.5 border-t border-slate-100" />
+
+                <div className="px-3 py-1 text-[10px] font-bold text-slate-400 uppercase tracking-wider">
+                  Preset Column Widths
+                </div>
+
+                <div className="grid grid-cols-3 gap-1 px-3 py-1">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFitToWidth(true);
+                      handleFormatSql(true, 80);
+                    }}
+                    className="px-2 py-1 bg-slate-100 hover:bg-[#fdf0f6] hover:text-[#e20074] rounded text-[11px] font-mono font-medium transition-colors cursor-pointer text-center"
+                    title="Wrap at 80 characters per line"
+                  >
+                    80 cols
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFitToWidth(true);
+                      handleFormatSql(true, 100);
+                    }}
+                    className="px-2 py-1 bg-slate-100 hover:bg-[#fdf0f6] hover:text-[#e20074] rounded text-[11px] font-mono font-medium transition-colors cursor-pointer text-center"
+                    title="Wrap at 100 characters per line"
+                  >
+                    100 cols
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFitToWidth(true);
+                      handleFormatSql(true, 120);
+                    }}
+                    className="px-2 py-1 bg-slate-100 hover:bg-[#fdf0f6] hover:text-[#e20074] rounded text-[11px] font-mono font-medium transition-colors cursor-pointer text-center"
+                    title="Wrap at 120 characters per line"
+                  >
+                    120 cols
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Right side: Diagnostics button toggle */}
@@ -346,16 +546,18 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
       {/* Main Workspace: Full-Size SQL Editor + Diagnostics Panel */}
       <div className="flex-1 flex overflow-hidden w-full h-full bg-white">
         {/* Left: SQL Editor Area */}
-        <div className="flex-1 flex flex-col overflow-hidden h-full">
+        <div ref={editorAreaRef} className="flex-1 flex flex-col overflow-hidden h-full">
           <HanaCodeEditor
             value={sqlContent}
             onChange={(newVal) => handleSqlChange(newVal, true)}
             diagnostics={validation.diagnostics}
-            onCursorChange={(line, col) => setCursorPos({ line, col })}
+            placeholder="-- Enter or paste your SAP HANA SQL statement here..."
+            onCursorChange={handleCursorChange}
             onUndo={handleUndo}
             onRedo={handleRedo}
             onSave={handleSave}
             targetLine={targetLine}
+            onTargetLineHandled={handleTargetLineHandled}
           />
         </div>
 
@@ -388,12 +590,14 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
               {/* Status Score Badge */}
               <span
                 className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border ${
-                  validation.isValid
+                  sqlContent.trim().length === 0
+                    ? 'bg-slate-100 text-slate-600 border-slate-200'
+                    : validation.isValid
                     ? 'bg-emerald-50 text-emerald-700 border-emerald-200'
                     : 'bg-rose-50 text-rose-700 border-rose-200'
                 }`}
               >
-                {validation.isValid ? 'SAP HANA Valid' : `${validation.errorCount} Issues`}
+                {sqlContent.trim().length === 0 ? 'Ready' : validation.isValid ? 'SAP HANA Valid' : `${validation.errorCount} Issues`}
               </span>
             </div>
 
@@ -442,10 +646,12 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
                     <CheckCircle2 className="w-6 h-6" />
                   </div>
                   <h3 className="text-xs font-bold text-slate-800 mb-1">
-                    No Diagnostics Detected
+                    {sqlContent.trim().length === 0 ? 'Ready for SQL' : 'No Diagnostics Detected'}
                   </h3>
                   <p className="text-[11px] text-slate-500 max-w-[240px] leading-relaxed">
-                    {diagnosticFilter === 'all'
+                    {sqlContent.trim().length === 0
+                      ? 'Type or paste your SAP HANA SQL statement in the editor to view syntax validation and diagnostics.'
+                      : diagnosticFilter === 'all'
                       ? 'Your SQL statement conforms with SAP HANA syntax rules and standards.'
                       : `No ${diagnosticFilter}s found for this SQL statement.`}
                   </p>
@@ -531,7 +737,16 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
       {/* Bottom Status Bar */}
       <footer className="h-7 bg-white border-t border-slate-200 px-3 flex items-center justify-between shrink-0 select-none text-[11px] text-slate-500 font-mono">
         <div className="flex items-center gap-2">
-          {validation.isValid ? (
+          {sqlContent.trim().length === 0 ? (
+            <button
+              type="button"
+              onClick={() => setShowDiagnostics(true)}
+              className="text-slate-500 font-medium flex items-center gap-1 hover:underline cursor-pointer"
+            >
+              <CheckCircle2 className="w-3.5 h-3.5 text-slate-400" />
+              <span>Ready for SAP HANA SQL input</span>
+            </button>
+          ) : validation.isValid ? (
             <button
               type="button"
               onClick={() => setShowDiagnostics(true)}
@@ -553,6 +768,20 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
         </div>
 
         <div className="flex items-center gap-4">
+          <span className="hidden sm:inline-flex items-center gap-1.5 text-slate-500">
+            {fitToWidth ? (
+              <span className="text-[#e20074] font-medium flex items-center gap-1">
+                <WrapText className="w-3 h-3" />
+                <span>Fit to width (~{screenWidthChars} cols)</span>
+              </span>
+            ) : (
+              <span className="flex items-center gap-1 text-slate-400">
+                <span>↔</span>
+                <span>Horizontal scroll active</span>
+              </span>
+            )}
+          </span>
+          <div className="h-3 w-px bg-slate-200 hidden sm:block" />
           <span>
             Line {cursorPos.line}, Column {cursorPos.col}
           </span>

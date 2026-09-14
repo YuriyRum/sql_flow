@@ -461,21 +461,14 @@ export function validateHanaSql(sql: string): ValidationResult {
   const trimmed = sql.trim();
 
   if (!trimmed) {
-    diagnostics.push({
-      line: 1,
-      column: 1,
-      message: 'SQL query content cannot be empty.',
-      severity: 'error',
-      ruleId: 'HANA_EMPTY_QUERY',
-    });
     return {
-      isValid: false,
-      errorCount: 1,
+      isValid: true,
+      errorCount: 0,
       warningCount: 0,
-      diagnostics,
+      diagnostics: [],
       extractedTables: { inputs: [], outputs: [] },
       extractedParams: [],
-      dialectScore: 0,
+      dialectScore: 100,
     };
   }
 
@@ -1919,11 +1912,20 @@ function tokenizeForFormatting(sql: string): FormatToken[] {
   return tokens;
 }
 
+export interface FormatOptions {
+  fitToWidth?: boolean;
+  maxLineWidth?: number;
+}
+
 /**
  * SAP HANA Best-Practices SQL Formatter
+ * Supports standard formatting and optional screen-width wrapping.
  */
-export function formatHanaSql(sql: string): string {
+export function formatHanaSql(sql: string, options?: FormatOptions): string {
   if (!sql || !sql.trim()) return sql;
+
+  const fitToWidth = Boolean(options?.fitToWidth);
+  const maxLineWidth = Math.max(40, options?.maxLineWidth || 80);
 
   const rawTokens = tokenizeForFormatting(sql);
   if (rawTokens.length === 0) return sql;
@@ -2058,7 +2060,26 @@ export function formatHanaSql(sql: string): string {
 
     if (tok.type === 'COMMENT_LINE' || tok.type === 'COMMENT_BLOCK') {
       flushLine();
-      lines.push(indentStr() + tok.value);
+      if (fitToWidth && tok.type === 'COMMENT_LINE' && (indentStr().length + tok.value.length) > maxLineWidth) {
+        // Wrap long single-line comment to fit screen width
+        const prefix = '-- ';
+        const text = tok.value.replace(/^--\s*/, '');
+        const words = text.split(/\s+/);
+        let curComment = prefix;
+        for (const w of words) {
+          if (indentStr().length + curComment.length + 1 + w.length > maxLineWidth && curComment !== prefix) {
+            lines.push(indentStr() + curComment.trimEnd());
+            curComment = prefix + w + ' ';
+          } else {
+            curComment += w + ' ';
+          }
+        }
+        if (curComment.trim() !== '--') {
+          lines.push(indentStr() + curComment.trimEnd());
+        }
+      } else {
+        lines.push(indentStr() + tok.value);
+      }
       continue;
     }
 
@@ -2098,33 +2119,31 @@ export function formatHanaSql(sql: string): string {
       continue;
     }
 
+    // JOIN ON clause
+    if (tok.type === 'KEYWORD' && tok.upper === 'ON' && parenDepth === 0) {
+      flushLine();
+      currentLine = '  ON ';
+      continue;
+    }
+
     // Logical AND / OR in clauses
-    if (
-      tok.type === 'KEYWORD' &&
-      (tok.upper === 'AND' || tok.upper === 'OR') &&
-      parenDepth === 0
-    ) {
-      flushLine();
-      currentLine = tok.upper + ' ';
-      continue;
+    if (tok.type === 'KEYWORD' && (tok.upper === 'AND' || tok.upper === 'OR')) {
+      if (parenDepth === 0 || (fitToWidth && (indentStr().length + currentLine.length + 8) > maxLineWidth)) {
+        flushLine();
+        currentLine = tok.upper + ' ';
+        continue;
+      }
     }
 
-    // SELECT projection top-level commas
-    if (
-      tok.type === 'SYMBOL' &&
-      tok.value === ',' &&
-      inSelectProjection &&
-      parenDepth === 0
-    ) {
+    // SELECT projection top-level commas & general commas
+    if (tok.type === 'SYMBOL' && tok.value === ',') {
       currentLine += ',';
-      flushLine();
-      continue;
-    }
+      const shouldWrap =
+        (inSelectProjection && parenDepth === 0) ||
+        (fitToWidth && (indentStr().length + currentLine.length + 8 > maxLineWidth)) ||
+        (parenDepth === 0 && currentLine.length > 40);
 
-    // Other top-level commas
-    if (tok.type === 'SYMBOL' && tok.value === ',' && parenDepth === 0) {
-      currentLine += ',';
-      if (currentLine.length > 40) {
+      if (shouldWrap) {
         flushLine();
       } else {
         currentLine += ' ';
@@ -2230,6 +2249,25 @@ export function formatHanaSql(sql: string): string {
       }
       currentLine += tok.value;
       continue;
+    }
+
+    // In fitToWidth mode: check if adding this token exceeds maxLineWidth
+    if (fitToWidth && currentLine.trim().length > 0) {
+      const isAttachedPunctuation =
+        tok.value === '.' ||
+        tok.value === ',' ||
+        tok.value === ';' ||
+        tok.value === ')' ||
+        tok.value === ']' ||
+        tok.value === '(';
+      const prevWasDot = prev && prev.value === '.';
+
+      if (!isAttachedPunctuation && !prevWasDot) {
+        const candidateLen = indentStr().length + currentLine.length + 1 + tok.value.length;
+        if (candidateLen > maxLineWidth) {
+          flushLine();
+        }
+      }
     }
 
     // Spacing

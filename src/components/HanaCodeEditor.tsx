@@ -16,24 +16,28 @@ interface HanaCodeEditorProps {
   value: string;
   onChange: (value: string) => void;
   diagnostics: SyntaxDiagnostic[];
+  placeholder?: string;
   readOnly?: boolean;
   onCursorChange?: (line: number, col: number) => void;
   onUndo?: () => void;
   onRedo?: () => void;
   onSave?: () => void;
   targetLine?: number | null;
+  onTargetLineHandled?: () => void;
 }
 
 export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
   value,
   onChange,
   diagnostics,
+  placeholder,
   readOnly = false,
   onCursorChange,
   onUndo,
   onRedo,
   onSave,
   targetLine = null,
+  onTargetLineHandled,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
@@ -45,12 +49,27 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
   const [replaceTerm, setReplaceTerm] = useState('');
   const [highlightedLine, setHighlightedLine] = useState<number | null>(null);
 
+  const onCursorChangeRef = useRef(onCursorChange);
+  useEffect(() => {
+    onCursorChangeRef.current = onCursorChange;
+  });
+
+  const onTargetLineHandledRef = useRef(onTargetLineHandled);
+  useEffect(() => {
+    onTargetLineHandledRef.current = onTargetLineHandled;
+  });
+
+  const valueRef = useRef(value);
+  useEffect(() => {
+    valueRef.current = value;
+  });
+
   const lines = value.split('\n');
 
   // Effect to scroll to target line when clicked from diagnostics
   useEffect(() => {
     if (targetLine && targetLine > 0 && textareaRef.current) {
-      const linesArr = value.split('\n');
+      const linesArr = valueRef.current.split('\n');
       const lineIndex = Math.min(targetLine - 1, Math.max(0, linesArr.length - 1));
 
       // Calculate character index offset for beginning of targetLine
@@ -64,6 +83,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
 
       if (textareaRef.current) {
         textareaRef.current.scrollTop = scrollTop;
+        textareaRef.current.scrollLeft = 0;
         textareaRef.current.selectionStart = charPos;
         textareaRef.current.selectionEnd = charPos + (linesArr[lineIndex]?.length || 0);
         textareaRef.current.focus();
@@ -74,18 +94,20 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
       }
       if (highlightRef.current) {
         highlightRef.current.scrollTop = scrollTop;
+        highlightRef.current.scrollLeft = 0;
       }
 
       setHighlightedLine(targetLine);
-      setCursorPos({ line: targetLine, col: 1 });
-      onCursorChange?.(targetLine, 1);
+      setCursorPos((prev) => (prev.line === targetLine && prev.col === 1 ? prev : { line: targetLine, col: 1 }));
+      onCursorChangeRef.current?.(targetLine, 1);
+      onTargetLineHandledRef.current?.();
 
       const timer = setTimeout(() => {
         setHighlightedLine(null);
       }, 2500);
       return () => clearTimeout(timer);
     }
-  }, [targetLine, value, onCursorChange]);
+  }, [targetLine]);
 
   // Diagnostics indexed by line number
   const diagnosticsByLine = useMemo(() => {
@@ -120,10 +142,8 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
     const line = lineArr.length;
     const col = lineArr[lineArr.length - 1].length + 1;
 
-    setCursorPos({ line, col });
-    if (onCursorChange) {
-      onCursorChange(line, col);
-    }
+    setCursorPos((prev) => (prev.line === line && prev.col === col ? prev : { line, col }));
+    onCursorChangeRef.current?.(line, col);
   };
 
   // Handle Shortcuts & Tab in editor (No autocomplete)
@@ -357,7 +377,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
     return (
       <div
         key={lineIdx}
-        className={`h-6 leading-6 whitespace-pre transition-colors ${
+        className={`h-6 leading-6 whitespace-pre min-w-full w-max block transition-colors ${
           isHighlighted
             ? 'bg-[#e20074]/15 border-l-2 border-[#e20074]'
             : hasError
@@ -367,7 +387,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
             : ''
         }`}
       >
-        {tokens}
+        {tokens.length === 0 ? '\u00A0' : tokens}
       </div>
     );
   };
@@ -454,13 +474,19 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
           <div
             ref={highlightRef}
             aria-hidden="true"
-            className="absolute inset-0 py-3 px-4 text-xs font-mono overflow-hidden pointer-events-none z-0"
-            style={{ tabSize: 4 }}
+            className="absolute inset-0 py-3 px-4 text-xs font-mono overflow-hidden pointer-events-none z-0 whitespace-pre"
+            style={{ tabSize: 4, lineHeight: '1.5rem', whiteSpace: 'pre' }}
           >
-            {lines.map((line, idx) => renderHighlightedLine(line, idx))}
+            {value.length === 0 && placeholder ? (
+              <span className="text-slate-300 select-none italic font-mono">
+                {placeholder}
+              </span>
+            ) : (
+              lines.map((line, idx) => renderHighlightedLine(line, idx))
+            )}
           </div>
 
-          {/* Transparent Input Textarea */}
+          {/* Transparent Input Textarea with Horizontal Scrolling */}
           <textarea
             ref={textareaRef}
             id="hana-sql-textarea"
@@ -475,11 +501,20 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
             onKeyDown={handleKeyDown}
             readOnly={readOnly}
             spellCheck={false}
+            wrap="off"
             autoCapitalize="off"
             autoComplete="off"
             autoCorrect="off"
             className="absolute inset-0 w-full h-full py-3 px-4 text-xs font-mono bg-transparent text-transparent caret-[#e20074] resize-none outline-none overflow-auto z-10 selection:bg-[#e20074]/20 selection:text-transparent"
-            style={{ tabSize: 4, lineHeight: '1.5rem' }}
+            style={{
+              tabSize: 4,
+              lineHeight: '1.5rem',
+              whiteSpace: 'pre',
+              wordBreak: 'normal',
+              overflowWrap: 'normal',
+              overflowX: 'auto',
+              overflowY: 'auto',
+            }}
           />
         </div>
       </div>
