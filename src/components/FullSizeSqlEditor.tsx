@@ -25,16 +25,19 @@ import {
   Redo2,
   Save,
   Power,
-  X
+  X,
+  ExternalLink
 } from 'lucide-react';
 
 interface FullSizeSqlEditorProps {
   node: SQLNode;
   pipeline: FlowPipeline;
   onSaveNode: (updatedNode: SQLNode) => void;
-  onClose: () => void;
+  onClose?: () => void;
   onNavigateNode: (nodeId: string) => void;
   onOpenDocumentation?: (node: SQLNode) => void;
+  onAddNode?: () => void;
+  onDeleteNode?: (nodeId: string) => void;
 }
 
 export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
@@ -44,6 +47,8 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
   onClose,
   onNavigateNode,
   onOpenDocumentation,
+  onAddNode,
+  onDeleteNode,
 }) => {
   const [currentNode, setCurrentNode] = useState<SQLNode>(node);
   const [validation, setValidation] = useState<ValidationResult>(() => validateHanaSql(node.sqlContent));
@@ -52,6 +57,15 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
   const [diagFilter, setDiagFilter] = useState<'all' | 'errors' | 'warnings' | 'info'>('all');
   const [saveSuccess, setSaveSuccess] = useState(false);
   const [mobileView, setMobileView] = useState<'editor' | 'diagnostics'>('editor');
+  const [scrollToLineNum, setScrollToLineNum] = useState<number | null>(null);
+
+  const handleJumpToDiagnosticLine = (line: number) => {
+    setScrollToLineNum(line);
+    setMobileView('editor');
+    setTimeout(() => {
+      setScrollToLineNum(null);
+    }, 100);
+  };
 
   // Reference for saved baseline to detect unsaved modifications
   const savedNodeRef = useRef<SQLNode>({ ...node });
@@ -208,67 +222,6 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
     handleSqlChange(formatted);
   };
 
-  const handleInsertSnippet = (snippetType: string) => {
-    let snippet = '';
-    switch (snippetType) {
-      case 'aggregation_kpi':
-        snippet = `\nSELECT 
-    "CATEGORY",
-    COUNT(DISTINCT "DOCUMENT_ID") AS "TOTAL_COUNT",
-    SUM("AMOUNT") AS "TOTAL_REVENUE",
-    ROUND(AVG("AMOUNT"), 2) AS "AVG_REVENUE",
-    MIN("AMOUNT") AS "MIN_AMOUNT",
-    MAX("AMOUNT") AS "MAX_AMOUNT"
-FROM "SCHEMA"."FACT_TABLE"
-WHERE "STATUS" = 'POSTED'
-GROUP BY "CATEGORY"
-HAVING SUM("AMOUNT") > 0
-ORDER BY "TOTAL_REVENUE" DESC;`;
-        break;
-      case 'master_join':
-        snippet = `\nSELECT 
-    head."DOC_ID",
-    item."LINE_ID",
-    cust."NAME" AS "CUSTOMER_NAME",
-    cust."COUNTRY_CODE",
-    item."MATERIAL",
-    item."QUANTITY",
-    item."AMOUNT"
-FROM "SCHEMA"."HEADER_TABLE" AS head
-INNER JOIN "SCHEMA"."ITEM_TABLE" AS item 
-    ON head."DOC_ID" = item."DOC_ID"
-LEFT OUTER JOIN "SCHEMA"."CUSTOMER_MASTER" AS cust 
-    ON head."CUSTOMER_ID" = cust."CUSTOMER_ID"
-WHERE head."DOC_DATE" >= :IP_START_DATE
-ORDER BY item."AMOUNT" DESC;`;
-        break;
-      case 'cte_query':
-        snippet = `\nWITH ranked_orders AS (
-    SELECT 
-        "CUSTOMER_ID",
-        "SALES_AMOUNT",
-        ROW_NUMBER() OVER (PARTITION BY "CUSTOMER_ID" ORDER BY "ORDER_DATE" DESC) AS "ORDER_SEQ"
-    FROM "SCHEMA"."FACT_ORDERS"
-)
-SELECT 
-    "CUSTOMER_ID",
-    "SALES_AMOUNT"
-FROM ranked_orders
-WHERE "ORDER_SEQ" = 1;`;
-        break;
-      case 'window_ranking':
-        snippet = `\nSELECT 
-    "CATEGORY",
-    "PRODUCT_ID",
-    "REVENUE",
-    DENSE_RANK() OVER (PARTITION BY "CATEGORY" ORDER BY "REVENUE" DESC) AS "CATEGORY_RANK"
-FROM "SCHEMA"."FACT_SALES";`;
-        break;
-    }
-
-    handleSqlChange(currentNode.sqlContent + snippet);
-  };
-
   const handleCopySql = () => {
     navigator.clipboard.writeText(currentNode.sqlContent);
     setCopied(true);
@@ -387,25 +340,51 @@ FROM "SCHEMA"."FACT_SALES";`;
     <div className="fixed inset-0 z-50 bg-white text-slate-800 flex flex-col overflow-hidden animate-fadeIn">
       {/* Top Header Navigation Bar */}
       <header className="h-14 bg-white border-b border-slate-200 px-4 flex items-center justify-between shrink-0 select-none shadow-sm">
-        {/* Left Section: Back to Flow & Node Identity */}
+        {/* Left Section: Brand Logo & Node Selector */}
         <div className="flex items-center gap-3">
-          <button
-            type="button"
-            id="back-to-flow-button"
-            onClick={handleAttemptClose}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded-md text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
-            title="Return to visual flow diagram"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Back to Flow</span>
-          </button>
+          {/* Brand Logo */}
+          <div className="flex items-center gap-2 px-3 py-1.5 bg-[#fdf0f6] text-[#c70066] rounded-lg border border-[#f8b4d9] font-bold text-xs shadow-2xs">
+            <FileCode className="w-4 h-4 text-[#e20074]" />
+            <span className="hidden sm:inline">SAP HANA SQL SELECT Editor</span>
+          </div>
 
-          <div className="h-4 w-px bg-slate-200 mx-1" />
+          {onClose && (
+            <button
+              type="button"
+              id="back-to-flow-button"
+              onClick={handleAttemptClose}
+              className="flex items-center gap-1.5 px-3 py-1.5 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded-md text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
+              title="Return to visual flow diagram"
+            >
+              <ArrowLeft className="w-3.5 h-3.5" />
+              <span>Back</span>
+            </button>
+          )}
 
-          {/* Node Step Badge & Title */}
+          <div className="h-4 w-px bg-slate-200 mx-0.5" />
+
+          {/* Statement Dropdown Switcher */}
+          {pipeline && pipeline.nodes && pipeline.nodes.length > 1 && (
+            <div className="flex items-center gap-1.5">
+              <span className="text-[11px] font-medium text-slate-400 hidden md:inline">Query:</span>
+              <select
+                value={currentNode.id}
+                onChange={(e) => handleAttemptNavigate(e.target.value)}
+                className="bg-slate-50 border border-slate-200 hover:border-[#f8b4d9] text-slate-800 text-xs font-semibold rounded-md px-2 py-1 outline-none transition-colors cursor-pointer max-w-[180px] sm:max-w-[240px]"
+              >
+                {pipeline.nodes.map((n) => (
+                  <option key={n.id} value={n.id}>
+                    Step #{n.executionOrder}: {n.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Node Step Badge & Title Input */}
           <div className="flex items-center gap-2">
-            <span className="px-2.5 py-0.5 bg-[#fdf0f6] text-[#c70066] font-mono text-xs font-semibold rounded-md border border-[#f8b4d9] shadow-sm">
-              Step {currentNode.executionOrder}
+            <span className="px-2.5 py-0.5 bg-slate-100 text-slate-700 font-mono text-xs font-bold rounded-md border border-slate-200 shadow-2xs">
+              Step #{currentNode.executionOrder}
             </span>
 
             <input
@@ -415,8 +394,8 @@ FROM "SCHEMA"."FACT_SALES";`;
               onChange={(e) => {
                 setCurrentNode((prev) => ({ ...prev, name: e.target.value }));
               }}
-              className="bg-transparent font-semibold text-sm text-slate-900 focus:bg-slate-100 rounded px-2 py-1 outline-none border border-transparent focus:border-[#e20074] w-56 md:w-72 transition-colors"
-              placeholder="Query Node Name..."
+              className="bg-transparent font-semibold text-sm text-slate-900 focus:bg-slate-100 rounded px-2 py-1 outline-none border border-transparent focus:border-[#e20074] w-44 sm:w-56 md:w-64 transition-colors"
+              placeholder="Query Name..."
             />
           </div>
 
@@ -583,51 +562,6 @@ FROM "SCHEMA"."FACT_SALES";`;
             <span>Format</span>
           </button>
 
-          {/* Snippets Dropdown */}
-          <div className="relative group">
-            <button
-              type="button"
-              className="flex items-center gap-1 px-2.5 py-1 bg-white hover:bg-slate-50 text-slate-700 hover:text-[#e20074] rounded text-xs font-medium transition-colors border border-slate-200 hover:border-[#f8b4d9] shadow-sm cursor-pointer"
-            >
-              <FileCode className="w-3.5 h-3.5 text-[#e20074]" />
-              <span>Snippets</span>
-            </button>
-            <div className="absolute right-0 top-full mt-1 w-56 bg-white border border-slate-200 rounded-lg shadow-xl py-1 hidden group-hover:block z-30">
-              <button
-                type="button"
-                onClick={() => handleInsertSnippet('aggregation_kpi')}
-                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2 cursor-pointer"
-              >
-                <Layers className="w-3.5 h-3.5 text-[#e20074]" />
-                <span>SELECT KPI Aggregation</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleInsertSnippet('master_join')}
-                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2 cursor-pointer"
-              >
-                <ArrowRightLeft className="w-3.5 h-3.5 text-amber-600" />
-                <span>SELECT Dimension Joins</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleInsertSnippet('window_ranking')}
-                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2 cursor-pointer"
-              >
-                <Zap className="w-3.5 h-3.5 text-[#e20074]" />
-                <span>SELECT Window DENSE_RANK()</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleInsertSnippet('cte_query')}
-                className="w-full text-left px-3 py-1.5 text-xs text-slate-700 hover:bg-[#fdf0f6] hover:text-[#c70066] flex items-center gap-2 cursor-pointer"
-              >
-                <Terminal className="w-3.5 h-3.5 text-indigo-600" />
-                <span>WITH CTE Sequence SELECT</span>
-              </button>
-            </div>
-          </div>
-
           {/* Copy SQL */}
           <button
             type="button"
@@ -760,6 +694,7 @@ FROM "SCHEMA"."FACT_SALES";`;
               onUndo={handleUndo}
               onRedo={handleRedo}
               onSave={handleSave}
+              targetLine={scrollToLineNum}
             />
           </div>
         </div>
@@ -861,24 +796,33 @@ FROM "SCHEMA"."FACT_SALES";`;
                 {filteredDiagnostics.map((diag, idx) => (
                   <div
                     key={idx}
-                    className={`p-3 rounded-xl border flex flex-col gap-1.5 transition-all shadow-2xs ${
+                    onClick={() => handleJumpToDiagnosticLine(diag.line)}
+                    className={`p-3 rounded-xl border flex flex-col gap-1.5 transition-all shadow-2xs cursor-pointer hover:shadow-md hover:border-[#e20074] group/diag ${
                       diag.severity === 'error'
-                        ? 'bg-rose-50/70 border-rose-200 text-rose-900'
+                        ? 'bg-rose-50/70 border-rose-200 text-rose-900 hover:bg-rose-100/60'
                         : diag.severity === 'warning'
-                        ? 'bg-amber-50/70 border-amber-200 text-amber-900'
-                        : 'bg-sky-50/70 border-sky-200 text-sky-900'
+                        ? 'bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/60'
+                        : 'bg-sky-50/70 border-sky-200 text-sky-900 hover:bg-sky-100/60'
                     }`}
+                    title="Click to jump to line in editor"
                   >
-                    <div className="flex items-center gap-2 font-semibold text-xs">
-                      {diag.severity === 'error' ? (
-                        <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-                      ) : diag.severity === 'warning' ? (
-                        <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
-                      ) : (
-                        <Info className="w-4 h-4 text-sky-600 shrink-0" />
-                      )}
-                      <span className="font-mono text-[11px] bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700 shadow-2xs font-semibold">
-                        Line {diag.line}
+                    <div className="flex items-center justify-between font-semibold text-xs">
+                      <div className="flex items-center gap-2">
+                        {diag.severity === 'error' ? (
+                          <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
+                        ) : diag.severity === 'warning' ? (
+                          <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0" />
+                        ) : (
+                          <Info className="w-4 h-4 text-sky-600 shrink-0" />
+                        )}
+                        <span className="font-mono text-[11px] bg-white px-2 py-0.5 rounded border border-slate-200 text-slate-700 shadow-2xs font-bold group-hover/diag:border-[#e20074] group-hover/diag:text-[#e20074] transition-colors">
+                          Line {diag.line}
+                        </span>
+                      </div>
+
+                      <span className="text-[10px] text-slate-400 group-hover/diag:text-[#e20074] flex items-center gap-1 font-mono transition-colors">
+                        <span>Jump to line</span>
+                        <ExternalLink className="w-3 h-3" />
                       </span>
                     </div>
 

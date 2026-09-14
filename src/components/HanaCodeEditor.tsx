@@ -6,27 +6,17 @@ import {
   HANA_BUILTIN_FUNCTIONS,
 } from '../utils/hanaSqlValidator';
 import {
-  SQL_SNIPPETS,
   SAP_COMMON_TABLES,
   SAP_COMMON_COLUMNS,
   KEYWORDS_LIST,
-  SqlSnippet,
   AutocompleteItem,
 } from '../utils/sqlSnippets';
 import {
   AlertCircle,
   AlertTriangle,
-  Info,
   Search,
   X,
-  Code2,
-  Zap,
   Sparkles,
-  Check,
-  ChevronDown,
-  Table as TableIcon,
-  Terminal,
-  FileCode,
 } from 'lucide-react';
 
 interface HanaCodeEditorProps {
@@ -39,6 +29,7 @@ interface HanaCodeEditorProps {
   onUndo?: () => void;
   onRedo?: () => void;
   onSave?: () => void;
+  targetLine?: number | null;
 }
 
 export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
@@ -50,6 +41,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
   onUndo,
   onRedo,
   onSave,
+  targetLine = null,
 }) => {
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const lineNumbersRef = useRef<HTMLDivElement>(null);
@@ -59,6 +51,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
   const [showSearch, setShowSearch] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const [replaceTerm, setReplaceTerm] = useState('');
+  const [highlightedLine, setHighlightedLine] = useState<number | null>(null);
 
   // Autocomplete state
   const [showAutocomplete, setShowAutocomplete] = useState(false);
@@ -66,12 +59,47 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [wordRange, setWordRange] = useState<{ start: number; end: number }>({ start: 0, end: 0 });
 
-  // Snippets modal state
-  const [showSnippetsModal, setShowSnippetsModal] = useState(false);
-  const [snippetCategory, setSnippetCategory] = useState<string>('All');
-  const [snippetSearch, setSnippetSearch] = useState('');
-
   const lines = value.split('\n');
+
+  // Effect to scroll to target line when clicked from diagnostics or external trigger
+  useEffect(() => {
+    if (targetLine && targetLine > 0 && textareaRef.current) {
+      const linesArr = value.split('\n');
+      const lineIndex = Math.min(targetLine - 1, Math.max(0, linesArr.length - 1));
+
+      // Calculate character index offset for beginning of targetLine
+      let charPos = 0;
+      for (let i = 0; i < lineIndex; i++) {
+        charPos += linesArr[i].length + 1; // +1 for newline
+      }
+
+      const lineHeightPx = 24; // 1.5rem = 24px
+      const scrollTop = Math.max(0, lineIndex * lineHeightPx - 80);
+
+      if (textareaRef.current) {
+        textareaRef.current.scrollTop = scrollTop;
+        textareaRef.current.selectionStart = charPos;
+        textareaRef.current.selectionEnd = charPos + (linesArr[lineIndex]?.length || 0);
+        textareaRef.current.focus();
+      }
+
+      if (lineNumbersRef.current) {
+        lineNumbersRef.current.scrollTop = scrollTop;
+      }
+      if (highlightRef.current) {
+        highlightRef.current.scrollTop = scrollTop;
+      }
+
+      setHighlightedLine(targetLine);
+      setCursorPos({ line: targetLine, col: 1 });
+      onCursorChange?.(targetLine, 1);
+
+      const timer = setTimeout(() => {
+        setHighlightedLine(null);
+      }, 2500);
+      return () => clearTimeout(timer);
+    }
+  }, [targetLine, value, onCursorChange]);
 
   // Diagnostics indexed by line number
   const diagnosticsByLine = useMemo(() => {
@@ -103,25 +131,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
 
     const items: AutocompleteItem[] = [];
 
-    // 1. Snippets matching query
-    SQL_SNIPPETS.forEach((s) => {
-      if (
-        !query ||
-        s.trigger.toLowerCase().includes(query) ||
-        s.label.toLowerCase().includes(query) ||
-        s.category.toLowerCase().includes(query)
-      ) {
-        items.push({
-          label: s.label,
-          type: 'snippet',
-          detail: `[${s.category}] ${s.description}`,
-          insertText: s.snippet,
-          snippetObj: s,
-        });
-      }
-    });
-
-    // 2. SAP Tables matching query
+    // 1. SAP Tables matching query
     SAP_COMMON_TABLES.forEach((t) => {
       if (!query || t.label.toLowerCase().includes(query) || t.detail.toLowerCase().includes(query)) {
         items.push({
@@ -200,31 +210,6 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
     },
     [value, wordRange, onChange]
   );
-
-  // Insert snippet from Modal or Toolbar
-  const insertSnippetDirectly = (snippetText: string) => {
-    if (!textareaRef.current) {
-      onChange(value + '\n\n' + snippetText);
-      return;
-    }
-
-    const selStart = textareaRef.current.selectionStart;
-    const selEnd = textareaRef.current.selectionEnd;
-    const before = value.substring(0, selStart);
-    const after = value.substring(selEnd);
-
-    const spacing = before.trim().length > 0 && !before.endsWith('\n\n') ? '\n\n' : '';
-    const updated = before + spacing + snippetText + after;
-
-    onChange(updated);
-    setShowSnippetsModal(false);
-
-    setTimeout(() => {
-      if (textareaRef.current) {
-        textareaRef.current.focus();
-      }
-    }, 0);
-  };
 
   const updateCursorAndCheckAutocomplete = () => {
     if (!textareaRef.current) return;
@@ -513,11 +498,15 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
       i++;
     }
 
+    const isTargetHighlighted = lineNum === highlightedLine;
+
     return (
       <div
         key={lineIndex}
-        className={`h-6 leading-6 whitespace-pre font-mono relative ${
-          hasError
+        className={`h-6 leading-6 whitespace-pre font-mono relative transition-colors ${
+          isTargetHighlighted
+            ? 'bg-[#e20074]/20 border-l-4 border-[#e20074] ring-1 ring-[#e20074]/50'
+            : hasError
             ? 'bg-rose-50'
             : hasWarning
             ? 'bg-amber-50'
@@ -537,64 +526,11 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
     );
   };
 
-  const filteredSnippets = useMemo(() => {
-    return SQL_SNIPPETS.filter((s) => {
-      const matchCat = snippetCategory === 'All' || s.category === snippetCategory;
-      const matchSearch =
-        !snippetSearch ||
-        s.label.toLowerCase().includes(snippetSearch.toLowerCase()) ||
-        s.description.toLowerCase().includes(snippetSearch.toLowerCase()) ||
-        s.snippet.toLowerCase().includes(snippetSearch.toLowerCase());
-      return matchCat && matchSearch;
-    });
-  }, [snippetCategory, snippetSearch]);
-
-  const snippetCategories = ['All', 'Basic', 'Aggregation', 'Window & Analytics', 'Joins & Star Schema', 'CTE & Subqueries', 'SAP ERP Tables', 'Date & Time'];
-
   return (
     <div className="relative flex flex-col h-full w-full bg-white text-slate-800 font-mono rounded-lg border border-slate-200 hover:border-slate-300 overflow-hidden shadow-sm transition-colors">
-      {/* Top Code Editor Control & Snippets Toolbar */}
+      {/* Top Code Editor Control Toolbar */}
       <div className="bg-slate-800 text-slate-200 border-b border-slate-700 px-3 py-1.5 flex flex-wrap items-center justify-between gap-2 text-xs shrink-0 select-none z-20">
         <div className="flex flex-wrap items-center gap-2">
-          {/* Snippets Modal Button */}
-          <button
-            type="button"
-            onClick={() => setShowSnippetsModal(true)}
-            className="flex items-center gap-1.5 px-2.5 py-1 bg-[#e20074] hover:bg-[#c70066] text-white rounded-md font-bold text-[11px] transition-all shadow-xs cursor-pointer"
-            title="Open SQL SELECT Snippets Library & Template Gallery"
-          >
-            <Code2 className="w-3.5 h-3.5" />
-            <span>SQL Snippets Library</span>
-          </button>
-
-          {/* Quick Insert Snippet Dropdown */}
-          <div className="relative group">
-            <button
-              type="button"
-              className="flex items-center gap-1 px-2 py-1 bg-slate-700 hover:bg-slate-650 text-slate-200 rounded-md font-medium text-[11px] transition-colors border border-slate-600 cursor-pointer"
-            >
-              <Zap className="w-3 h-3 text-amber-400" />
-              <span>Quick Template</span>
-              <ChevronDown className="w-3 h-3 text-slate-400" />
-            </button>
-            <div className="absolute top-full left-0 mt-1 w-64 bg-slate-800 border border-slate-700 rounded-lg shadow-xl p-1 hidden group-hover:block z-30 space-y-0.5">
-              {SQL_SNIPPETS.slice(0, 6).map((snip) => (
-                <button
-                  key={snip.id}
-                  type="button"
-                  onClick={() => insertSnippetDirectly(snip.snippet)}
-                  className="w-full text-left px-2.5 py-1.5 rounded text-[11px] hover:bg-slate-700 text-slate-200 hover:text-white flex flex-col transition-colors cursor-pointer"
-                >
-                  <span className="font-bold text-indigo-300 flex items-center justify-between">
-                    <span>{snip.label}</span>
-                    <span className="text-[9px] uppercase px-1 py-0.2 bg-slate-900 rounded text-slate-400">{snip.category}</span>
-                  </span>
-                  <span className="text-[10px] text-slate-400 line-clamp-1">{snip.description}</span>
-                </button>
-              ))}
-            </div>
-          </div>
-
           {/* Autocomplete Trigger Info */}
           <button
             type="button"
@@ -807,113 +743,6 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
           )}
         </div>
       </div>
-
-      {/* SQL Snippets Library Modal */}
-      {showSnippetsModal && (
-        <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-xs flex items-center justify-center p-4 z-50 overflow-y-auto font-sans">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl w-full max-w-4xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden text-slate-100">
-            {/* Modal Header */}
-            <div className="p-4 bg-slate-800 border-b border-slate-700 flex items-center justify-between shrink-0">
-              <div className="flex items-center gap-2.5">
-                <div className="p-2 bg-[#e20074]/20 text-[#f8b4d9] rounded-xl border border-[#e20074]/30">
-                  <Code2 className="w-5 h-5 text-[#e20074]" />
-                </div>
-                <div>
-                  <h2 className="font-bold text-base text-white">
-                    SQL SELECT Statement Snippets & Template Library
-                  </h2>
-                  <p className="text-xs text-slate-400">
-                    Pre-engineered, optimized SAP HANA SELECT templates for complex analytics & ETLs
-                  </p>
-                </div>
-              </div>
-
-              <button
-                type="button"
-                onClick={() => setShowSnippetsModal(false)}
-                className="p-1.5 hover:bg-slate-700 text-slate-400 hover:text-white rounded-xl transition-colors cursor-pointer"
-              >
-                <X className="w-5 h-5" />
-              </button>
-            </div>
-
-            {/* Filter & Search Bar */}
-            <div className="p-4 bg-slate-850 border-b border-slate-700/80 flex flex-col sm:flex-row items-stretch sm:items-center justify-between gap-3 shrink-0">
-              {/* Search */}
-              <div className="relative flex-1">
-                <Search className="w-4 h-4 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                <input
-                  type="text"
-                  placeholder="Search SELECT templates by keywords, tables, or category..."
-                  value={snippetSearch}
-                  onChange={(e) => setSnippetSearch(e.target.value)}
-                  className="w-full bg-slate-900 border border-slate-700 rounded-xl pl-9 pr-3 py-2 text-xs text-white placeholder-slate-500 outline-none focus:border-[#e20074]"
-                />
-              </div>
-
-              {/* Category Filter Pills */}
-              <div className="flex flex-wrap items-center gap-1.5">
-                {snippetCategories.map((cat) => (
-                  <button
-                    key={cat}
-                    type="button"
-                    onClick={() => setSnippetCategory(cat)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-bold transition-all cursor-pointer ${
-                      snippetCategory === cat
-                        ? 'bg-[#e20074] text-white shadow-xs'
-                        : 'bg-slate-800 text-slate-400 hover:text-slate-200 border border-slate-700'
-                    }`}
-                  >
-                    {cat}
-                  </button>
-                ))}
-              </div>
-            </div>
-
-            {/* Snippets List Grid */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 custom-scrollbar">
-              {filteredSnippets.length === 0 ? (
-                <div className="py-12 text-center text-slate-400 text-xs">
-                  No SQL snippets found matching "{snippetSearch}"
-                </div>
-              ) : (
-                filteredSnippets.map((snip) => (
-                  <div
-                    key={snip.id}
-                    className="p-4 bg-slate-800/80 border border-slate-700 rounded-2xl hover:border-slate-600 transition-all flex flex-col gap-3 group"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div>
-                        <div className="flex items-center gap-2 mb-1">
-                          <h3 className="font-bold text-sm text-white">{snip.label}</h3>
-                          <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                            {snip.category}
-                          </span>
-                        </div>
-                        <p className="text-xs text-slate-400">{snip.description}</p>
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => insertSnippetDirectly(snip.snippet)}
-                        className="flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer shrink-0"
-                      >
-                        <Zap className="w-3.5 h-3.5" />
-                        <span>Insert Snippet</span>
-                      </button>
-                    </div>
-
-                    {/* Code Snippet Box */}
-                    <div className="p-3 bg-slate-950 rounded-xl border border-slate-800 overflow-x-auto font-mono text-[11px] text-emerald-400 leading-relaxed max-h-48 custom-scrollbar">
-                      <pre>{snip.snippet}</pre>
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
