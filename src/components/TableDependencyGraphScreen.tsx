@@ -644,9 +644,13 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                               <span className="text-slate-400 italic">(No schema)</span>
                             )}
                           </div>
-                          {node.branchName && parsedGraph.branchCount > 1 && (
-                            <div className="text-[10px] text-[#e20074] font-semibold flex items-center gap-1 mt-0.5">
-                              <span className="w-1.5 h-1.5 rounded-full bg-[#e20074]" />
+                          {node.branchName && (
+                            <div className={`text-[10px] font-semibold flex items-center gap-1 mt-0.5 ${
+                              node.branchName.includes('Subquery') ? 'text-purple-700 font-mono' : 'text-[#e20074]'
+                            }`}>
+                              <span className={`w-1.5 h-1.5 rounded-full ${
+                                node.branchName.includes('Subquery') ? 'bg-purple-600' : 'bg-[#e20074]'
+                              }`} />
                               <span>{node.branchName}</span>
                             </div>
                           )}

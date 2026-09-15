@@ -150,6 +150,350 @@ function parseSchemaAndTable(rawName: string): { schema?: string; table: string;
   return { schema: undefined, table, fullName: clean };
 }
 
+interface ExtractedSubquery {
+  sql: string;
+  fullMatch: string;
+  subqueryType: 'FROM' | 'JOIN' | 'WHERE_IN' | 'WHERE_EXISTS' | 'CTE' | 'SCALAR';
+  alias?: string;
+  joinType?: string;
+  onCondition?: string;
+  wherePredicate?: string;
+  outerPos: number;
+}
+
+/**
+ * Finds subqueries enclosed in parentheses (SELECT or WITH)
+ */
+function findSubqueriesInSql(cleanText: string): ExtractedSubquery[] {
+  const subqueries: ExtractedSubquery[] = [];
+  const len = cleanText.length;
+
+  for (let i = 0; i < len; i++) {
+    if (cleanText[i] === '(') {
+      const afterParen = cleanText.substring(i + 1).trimStart();
+      if (/^(?:SELECT|WITH)\b/i.test(afterParen)) {
+        let depth = 1;
+        let j = i + 1;
+        let inQuotes = false;
+        let quoteChar = '';
+
+        while (j < len && depth > 0) {
+          const char = cleanText[j];
+          if (!inQuotes && (char === "'" || char === '"')) {
+            inQuotes = true;
+            quoteChar = char;
+          } else if (inQuotes && char === quoteChar) {
+            inQuotes = false;
+          } else if (!inQuotes) {
+            if (char === '(') depth++;
+            else if (char === ')') depth--;
+          }
+          j++;
+        }
+
+        if (depth === 0) {
+          const innerSql = cleanText.substring(i + 1, j - 1).trim();
+          const fullMatch = cleanText.substring(i, j);
+
+          const prefix = cleanText.substring(Math.max(0, i - 120), i).trim();
+          const suffix = cleanText.substring(j, Math.min(len, j + 150)).trim();
+
+          let subqueryType: ExtractedSubquery['subqueryType'] = 'SCALAR';
+          let alias = '';
+          let joinType = '';
+          let onCondition = '';
+          let wherePredicate = '';
+
+          if (/\bFROM\s*$/i.test(prefix)) {
+            subqueryType = 'FROM';
+            const aliasMatch = suffix.match(/^(?:AS\s+)?([A-Za-z0-9_"`\[\]-]+)/i);
+            if (aliasMatch && !['WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'CROSS', 'GROUP', 'ORDER', 'LIMIT', 'HAVING', 'UNION', 'EXCEPT', 'INTERSECT'].includes(aliasMatch[1].toUpperCase())) {
+              alias = stripQuotes(aliasMatch[1]);
+            }
+          } else if (/\b(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN|JOIN)\s*$/i.test(prefix)) {
+            subqueryType = 'JOIN';
+            const joinMatch = prefix.match(/\b(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN|JOIN)\s*$/i);
+            if (joinMatch) {
+              joinType = joinMatch[1].toUpperCase().replace(/\s+/g, ' ');
+            }
+            const aliasOnMatch = suffix.match(/^(?:AS\s+)?([A-Za-z0-9_"`\[\]-]+)?(?:\s+ON\s+([\s\S]*?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|JOIN|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT)\b|$))?/i);
+            if (aliasOnMatch) {
+              if (aliasOnMatch[1] && !['ON', 'WHERE', 'JOIN', 'LEFT', 'RIGHT', 'INNER', 'FULL', 'CROSS', 'GROUP', 'ORDER', 'LIMIT'].includes(aliasOnMatch[1].toUpperCase())) {
+                alias = stripQuotes(aliasOnMatch[1]);
+              }
+              if (aliasOnMatch[2]) {
+                onCondition = aliasOnMatch[2].trim();
+              }
+            }
+          } else if (/\b(?:IN|NOT\s+IN)\s*$/i.test(prefix)) {
+            subqueryType = 'WHERE_IN';
+            const predMatch = prefix.match(/([A-Za-z0-9_".`\/\[\]-]+\s+(?:NOT\s+)?IN)\s*$/i);
+            if (predMatch) {
+              wherePredicate = `${predMatch[1]} (Subquery)`;
+            }
+          } else if (/\b(?:EXISTS|NOT\s+EXISTS)\s*$/i.test(prefix)) {
+            subqueryType = 'WHERE_EXISTS';
+            wherePredicate = prefix.match(/NOT\s+EXISTS/i) ? 'NOT EXISTS (Subquery)' : 'EXISTS (Subquery)';
+          } else if (/\bAS\s*$/i.test(prefix)) {
+            const cteMatch = prefix.match(/\bWITH\s+([A-Za-z0-9_"`\[\]-]+)\s+AS\s*$/i) || prefix.match(/,\s*([A-Za-z0-9_"`\[\]-]+)\s+AS\s*$/i);
+            if (cteMatch) {
+              subqueryType = 'CTE';
+              alias = stripQuotes(cteMatch[1]);
+            }
+          }
+
+          subqueries.push({
+            sql: innerSql,
+            fullMatch,
+            subqueryType,
+            alias,
+            joinType,
+            onCondition,
+            wherePredicate,
+            outerPos: i,
+          });
+        }
+      }
+    }
+  }
+
+  return subqueries;
+}
+
+/**
+ * Recursively parses subqueries embedded within SQL text (FROM subquery, JOIN subquery, WHERE IN/EXISTS subquery, CTEs).
+ * Extracts all nested table references, creates graph nodes for them, and constructs join/filter edges.
+ */
+function processSubqueriesInText(
+  sqlText: string,
+  branch: QueryBranch,
+  branchNodes: TableNodeData[],
+  branchTableAliasMap: Map<string, string>,
+  branchTableNameMap: Map<string, string>,
+  nodes: TableNodeData[],
+  edges: TableEdgeData[],
+  strings: string[],
+  isMultiBranch: boolean,
+  depth: number = 0
+) {
+  if (depth > 10) return;
+
+  const subqueries = findSubqueriesInSql(sqlText);
+
+  for (let sqIdx = 0; sqIdx < subqueries.length; sqIdx++) {
+    const sq = subqueries[sqIdx];
+    const innerSql = sq.sql;
+
+    let sqLabel = 'Subquery';
+    if (sq.subqueryType === 'FROM') {
+      sqLabel = sq.alias ? `Subquery in FROM (${sq.alias})` : 'Subquery in FROM';
+    } else if (sq.subqueryType === 'JOIN') {
+      sqLabel = sq.alias ? `Subquery in JOIN (${sq.alias})` : 'Subquery in JOIN';
+    } else if (sq.subqueryType === 'WHERE_IN') {
+      sqLabel = 'Subquery in WHERE (IN)';
+    } else if (sq.subqueryType === 'WHERE_EXISTS') {
+      sqLabel = 'Subquery in WHERE (EXISTS)';
+    } else if (sq.subqueryType === 'CTE') {
+      sqLabel = `Subquery in CTE (${sq.alias})`;
+    }
+
+    const extractedSubqueryTables: TableNodeData[] = [];
+
+    // 1. Extract FROM tables inside subquery
+    const fromMatch = innerSql.match(/\bFROM\s+([A-Za-z0-9_".`\/\[\]-]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"`\[\]-]+)?(?:\s*,\s*[A-Za-z0-9_".`\/\[\]-]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"`\[\]-]+)?)*)/i);
+    if (fromMatch) {
+      const fromSection = fromMatch[1];
+      const commaTables = fromSection.split(/\s*,\s*/);
+
+      commaTables.forEach((entry, idx) => {
+        const trimmedEntry = entry.trim();
+        if (!trimmedEntry) return;
+
+        const parts = trimmedEntry.split(/\s+(?:AS\s+)?/i);
+        const rawTable = parts[0];
+        const tableAlias = parts.length > 1 ? stripQuotes(parts[1]) : sq.alias || '';
+        const { schema, table, fullName } = parseSchemaAndTable(rawTable);
+
+        if (['(', 'SELECT', 'LATERAL', 'UNNEST'].includes(table.toUpperCase())) return;
+
+        const occurrenceNumber = nodes.length + 1;
+        const nodeId = `TBL_B${branch.branchIndex}_SQ${sqIdx}_F${idx}_${table.toUpperCase()}${tableAlias ? '_' + tableAlias : ''}_${occurrenceNumber}`;
+
+        const branchPrefix = isMultiBranch ? `[Branch ${branch.branchIndex}] ` : '';
+        const displayName = tableAlias
+          ? `${branchPrefix}[Subquery] ${fullName} (${tableAlias})`
+          : `${branchPrefix}[Subquery] ${fullName}`;
+
+        const node: TableNodeData = {
+          id: nodeId,
+          tableName: table,
+          schemaName: schema,
+          fullTableName: fullName,
+          alias: tableAlias,
+          displayName,
+          joinType: sq.subqueryType === 'JOIN' ? (sq.joinType as any) || 'INNER JOIN' : 'FROM',
+          whereConditions: [],
+          columns: [],
+          isRoot: false,
+          orderIndex: nodes.length,
+          branchIndex: branch.branchIndex,
+          branchName: sqLabel,
+        };
+
+        nodes.push(node);
+        branchNodes.push(node);
+        extractedSubqueryTables.push(node);
+
+        if (tableAlias) branchTableAliasMap.set(tableAlias.toUpperCase(), nodeId);
+        if (sq.alias) branchTableAliasMap.set(sq.alias.toUpperCase(), nodeId);
+        branchTableNameMap.set(table.toUpperCase(), nodeId);
+        branchTableNameMap.set(fullName.toUpperCase(), nodeId);
+      });
+    }
+
+    // 2. Extract JOIN tables inside subquery
+    const joinRegex = /\b(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN|JOIN)\s+([A-Za-z0-9_".`\/\[\]-]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_"`\[\]-]+))?(?:\s+ON\s+([\s\S]*?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|JOIN|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT)\b|$))?/gi;
+    let joinMatch: RegExpExecArray | null;
+    let joinIdx = 0;
+    while ((joinMatch = joinRegex.exec(innerSql)) !== null) {
+      joinIdx++;
+      const rawJoinType = joinMatch[1].toUpperCase().replace(/\s+/g, ' ');
+      const rawTable = joinMatch[2];
+      const tableAlias = joinMatch[3] ? stripQuotes(joinMatch[3]) : '';
+      const rawOnCondition = joinMatch[4] ? joinMatch[4].trim() : '';
+
+      const { schema, table, fullName } = parseSchemaAndTable(rawTable);
+      if (['(', 'SELECT', 'LATERAL', 'UNNEST'].includes(table.toUpperCase())) continue;
+
+      let normalizedJoinType: TableNodeData['joinType'] = 'INNER JOIN';
+      if (rawJoinType.includes('LEFT')) normalizedJoinType = 'LEFT JOIN';
+      else if (rawJoinType.includes('RIGHT')) normalizedJoinType = 'RIGHT JOIN';
+      else if (rawJoinType.includes('FULL')) normalizedJoinType = 'FULL JOIN';
+      else if (rawJoinType.includes('CROSS')) normalizedJoinType = 'CROSS JOIN';
+      else normalizedJoinType = 'INNER JOIN';
+
+      const occurrenceNumber = nodes.length + 1;
+      const nodeId = `TBL_B${branch.branchIndex}_SQ${sqIdx}_J${joinIdx}_${table.toUpperCase()}${tableAlias ? '_' + tableAlias : ''}_${occurrenceNumber}`;
+
+      const branchPrefix = isMultiBranch ? `[Branch ${branch.branchIndex}] ` : '';
+      const displayName = tableAlias
+        ? `${branchPrefix}[Subquery] ${fullName} (${tableAlias})`
+        : `${branchPrefix}[Subquery] ${fullName}`;
+
+      const targetNode: TableNodeData = {
+        id: nodeId,
+        tableName: table,
+        schemaName: schema,
+        fullTableName: fullName,
+        alias: tableAlias,
+        displayName,
+        joinType: normalizedJoinType,
+        whereConditions: [],
+        columns: [],
+        isRoot: false,
+        orderIndex: nodes.length,
+        branchIndex: branch.branchIndex,
+        branchName: sqLabel,
+      };
+
+      nodes.push(targetNode);
+      branchNodes.push(targetNode);
+      extractedSubqueryTables.push(targetNode);
+
+      if (tableAlias) branchTableAliasMap.set(tableAlias.toUpperCase(), nodeId);
+      branchTableNameMap.set(table.toUpperCase(), nodeId);
+      branchTableNameMap.set(fullName.toUpperCase(), nodeId);
+
+      const prevSubNode = extractedSubqueryTables[0];
+      if (prevSubNode && prevSubNode.id !== targetNode.id) {
+        const restoredOn = rawOnCondition ? restoreStrings(rawOnCondition, strings) : '';
+        edges.push({
+          id: `EDGE_SQ_${prevSubNode.id}_TO_${targetNode.id}_${edges.length}`,
+          sourceId: prevSubNode.id,
+          targetId: targetNode.id,
+          sourceName: prevSubNode.displayName,
+          targetName: targetNode.displayName,
+          sourceAlias: prevSubNode.alias,
+          targetAlias: targetNode.alias,
+          joinType: normalizedJoinType,
+          onCondition: restoredOn || 'Subquery Join',
+          detailedConditions: restoredOn ? restoredOn.split(/\s+AND\s+/i) : ['Subquery Join'],
+        });
+      }
+    }
+
+    // 3. Extract WHERE conditions inside innerSql for subquery tables
+    const innerWhereMatch = innerSql.match(/\bWHERE\s+([\s\S]*?)(?=\b(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT|WINDOW)\b|$)/i);
+    if (innerWhereMatch) {
+      const rawInnerWhere = innerWhereMatch[1].trim();
+      const restoredInnerWhere = restoreStrings(rawInnerWhere, strings);
+      const innerPredicates = splitTopLevelAnd(restoredInnerWhere);
+
+      for (const pred of innerPredicates) {
+        const cleanP = pred.trim();
+        if (!cleanP) continue;
+        extractedSubqueryTables.forEach((st) => {
+          if (!st.whereConditions.includes(cleanP)) {
+            st.whereConditions.push(cleanP);
+          }
+        });
+      }
+    }
+
+    // 4. Create Edges connecting subquery tables to outer query tables
+    if (extractedSubqueryTables.length > 0) {
+      const subNode = extractedSubqueryTables[0];
+      const primaryOuterTable = branchNodes.find((n) => !extractedSubqueryTables.some((st) => st.id === n.id));
+
+      if (primaryOuterTable) {
+        if (sq.subqueryType === 'JOIN' && sq.onCondition) {
+          const restoredOn = restoreStrings(sq.onCondition, strings);
+          edges.push({
+            id: `EDGE_SQ_JOIN_${primaryOuterTable.id}_TO_${subNode.id}_${edges.length}`,
+            sourceId: primaryOuterTable.id,
+            targetId: subNode.id,
+            sourceName: primaryOuterTable.displayName,
+            targetName: subNode.displayName,
+            sourceAlias: primaryOuterTable.alias,
+            targetAlias: subNode.alias,
+            joinType: sq.joinType || 'JOIN (Subquery)',
+            onCondition: restoredOn,
+            detailedConditions: restoredOn.split(/\s+AND\s+/i),
+          });
+        } else if (sq.subqueryType === 'WHERE_IN' || sq.subqueryType === 'WHERE_EXISTS') {
+          const condText = sq.wherePredicate || (sq.subqueryType === 'WHERE_IN' ? 'IN (Subquery)' : 'EXISTS (Subquery)');
+          edges.push({
+            id: `EDGE_SQ_FILTER_${primaryOuterTable.id}_TO_${subNode.id}_${edges.length}`,
+            sourceId: primaryOuterTable.id,
+            targetId: subNode.id,
+            sourceName: primaryOuterTable.displayName,
+            targetName: subNode.displayName,
+            sourceAlias: primaryOuterTable.alias,
+            targetAlias: subNode.alias,
+            joinType: sq.subqueryType === 'WHERE_IN' ? 'WHERE IN' : 'WHERE EXISTS',
+            onCondition: condText,
+            detailedConditions: [condText],
+          });
+        }
+      }
+    }
+
+    // 5. Recursively process nested subqueries inside this subquery
+    processSubqueriesInText(
+      innerSql,
+      branch,
+      branchNodes,
+      branchTableAliasMap,
+      branchTableNameMap,
+      nodes,
+      edges,
+      strings,
+      isMultiBranch,
+      depth + 1
+    );
+  }
+}
+
 interface QueryBranch {
   branchIndex: number;
   branchType: 'SELECT' | 'UNION' | 'UNION ALL' | 'EXCEPT' | 'EXCEPT ALL' | 'INTERSECT' | 'INTERSECT ALL' | 'MINUS' | 'CTE';
@@ -598,6 +942,19 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
         }
       }
     }
+
+    // 3e. Extract tables from subqueries in FROM, JOIN, and WHERE (IN / EXISTS) clauses
+    processSubqueriesInText(
+      branchText,
+      branch,
+      branchNodes,
+      branchTableAliasMap,
+      branchTableNameMap,
+      nodes,
+      edges,
+      strings,
+      isMultiBranch
+    );
   });
 
   // 4. If multi-branch (UNION / UNION ALL / INTERSECT / EXCEPT), create a UNION combiner node
