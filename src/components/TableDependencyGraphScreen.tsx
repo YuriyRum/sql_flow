@@ -618,18 +618,21 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                     } ${!isMatched ? 'opacity-30' : 'opacity-100'}`}
                   >
                     {/* Node Header */}
-                    <div className="p-3 bg-slate-50/80 border-b border-slate-100 rounded-t-xl flex items-center justify-between">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div className="w-6 h-6 rounded-md bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
-                          <Database className="w-3.5 h-3.5" />
+                    <div className="p-3 bg-slate-50/90 border-b border-slate-200 rounded-t-xl flex items-center justify-between">
+                      <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
+                        <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                          <Database className="w-4 h-4" />
                         </div>
-                        <div className="min-w-0">
+                        <div className="min-w-0 flex-1">
+                          <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-500">
+                            Table Name
+                          </div>
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-bold text-xs text-slate-900 truncate" title={node.tableName}>
-                              {node.tableName}
+                            <span className="font-bold text-xs text-slate-900 truncate font-mono" title={node.fullTableName || node.tableName}>
+                              {node.fullTableName || node.tableName}
                             </span>
                             {node.alias && (
-                              <span className="px-1.5 py-0.2 bg-slate-200 text-slate-800 rounded text-[10px] font-mono font-bold">
+                              <span className="px-1.5 py-0.2 bg-blue-100 text-blue-800 rounded text-[10px] font-mono font-bold border border-blue-200">
                                 AS {node.alias}
                               </span>
                             )}
