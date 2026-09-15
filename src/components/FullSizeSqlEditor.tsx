@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { SQLNode, ValidationResult, FlowPipeline } from '../types';
 import { HanaCodeEditor } from './HanaCodeEditor';
+import { TableDependencyGraphScreen } from './TableDependencyGraphScreen';
 import { validateHanaSql, formatHanaSql } from '../utils/hanaSqlValidator';
 import {
   CheckCircle2,
@@ -17,6 +18,7 @@ import {
   WrapText,
   ChevronDown,
   Check,
+  Workflow,
 } from 'lucide-react';
 
 export interface FullSizeSqlEditorProps {
@@ -51,6 +53,9 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
   // Diagnostics panel state - open by default as requested ("diagnostics must be here")
   const [showDiagnostics, setShowDiagnostics] = useState(true);
   const [diagnosticFilter, setDiagnosticFilter] = useState<'all' | 'error' | 'warning'>('all');
+
+  // Full size Table Dependency Graph screen state
+  const [showTableGraph, setShowTableGraph] = useState<boolean>(false);
 
   // Baseline reference for detecting dirty/unsaved state
   const savedSqlRef = useRef<string>(startingSql);
@@ -500,6 +505,20 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
               </div>
             )}
           </div>
+
+          <div className="h-4 w-px bg-slate-200 mx-1" />
+
+          {/* Table Dependency Graph Button */}
+          <button
+            type="button"
+            id="table-graph-btn"
+            onClick={() => setShowTableGraph(true)}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-[#fdf0f6] hover:bg-[#fce4f0] text-[#e20074] border border-[#f8b4d9] rounded-md text-xs font-semibold transition-all cursor-pointer shadow-2xs"
+            title="Open Table Dependency Graph (with ON conditions & WHERE filters per node)"
+          >
+            <Workflow className="w-3.5 h-3.5" />
+            <span>Table Graph</span>
+          </button>
         </div>
 
         {/* Right side: Diagnostics button toggle */}
@@ -788,6 +807,14 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
           <span>{sqlContent.length} chars</span>
         </div>
       </footer>
+
+      {/* Full-Size Table Dependency Graph Screen */}
+      {showTableGraph && (
+        <TableDependencyGraphScreen
+          sql={sqlContent}
+          onClose={() => setShowTableGraph(false)}
+        />
+      )}
     </div>
   );
 };
