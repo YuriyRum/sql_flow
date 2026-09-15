@@ -1,21 +1,24 @@
 /**
  * SQL Table Dependency & Condition Parser for SAP HANA
- * Extracts tables, aliases, join relationships, ON conditions on edges,
- * and specific WHERE conditions per table node.
+ * Extracts all table occurrences (including across multiple UNION / UNION ALL / INTERSECT / EXCEPT branches),
+ * aliases, join relationships, ON conditions on edges, and specific WHERE conditions per table occurrence.
  */
 
 export interface TableNodeData {
-  id: string; // unique identifier e.g. "VBAK_v"
+  id: string; // unique identifier e.g. "TBL_B1_1_VBAK_v"
   tableName: string; // "VBAK"
   schemaName?: string; // "SAP_S4HANA"
   fullTableName: string; // '"SAP_S4HANA"."VBAK"' or 'VBAK'
   alias: string; // "v" or ""
-  displayName: string; // '"SAP_S4HANA"."VBAK" (v)'
-  joinType: 'FROM' | 'INNER JOIN' | 'LEFT JOIN' | 'RIGHT JOIN' | 'FULL JOIN' | 'CROSS JOIN' | 'CTE' | 'TARGET';
-  whereConditions: string[]; // WHERE conditions specific to this table
+  displayName: string; // '"SAP_S4HANA"."VBAK" (v)' or 'VBAK (Branch 1)'
+  joinType: 'FROM' | 'INNER JOIN' | 'LEFT JOIN' | 'RIGHT JOIN' | 'FULL JOIN' | 'CROSS JOIN' | 'CTE' | 'TARGET' | 'UNION' | 'UNION ALL' | 'EXCEPT' | 'INTERSECT';
+  whereConditions: string[]; // WHERE conditions specific to this table occurrence
   columns: string[]; // Referenced columns from this table
   isRoot: boolean;
   orderIndex: number;
+  branchIndex?: number;
+  branchName?: string; // e.g. "Branch 1", "Branch 2 (UNION ALL)"
+  isOperator?: boolean; // true if this is a UNION / UNION ALL combiner node
   x?: number;
   y?: number;
 }
@@ -28,9 +31,10 @@ export interface TableEdgeData {
   targetName: string;
   sourceAlias: string;
   targetAlias: string;
-  joinType: string; // 'INNER JOIN', 'LEFT JOIN', etc.
+  joinType: string; // 'INNER JOIN', 'LEFT JOIN', 'UNION ALL', etc.
   onCondition: string; // e.g. 'v."SALES_DOCUMENT" = p."SALES_DOCUMENT"'
   detailedConditions: string[];
+  isUnionEdge?: boolean;
 }
 
 export interface ParsedTableGraph {
@@ -39,6 +43,7 @@ export interface ParsedTableGraph {
   globalWhereConditions: string[]; // WHERE conditions not tied to a single table
   statementType: 'SELECT' | 'INSERT' | 'UPDATE' | 'DELETE' | 'MERGE' | 'UNKNOWN';
   cteCount: number;
+  branchCount: number;
   hasErrors: boolean;
   rawSql: string;
 }
@@ -143,9 +148,91 @@ function parseSchemaAndTable(rawName: string): { schema?: string; table: string;
   return { table: stripQuotes(clean), fullName: clean };
 }
 
+interface QueryBranch {
+  branchIndex: number;
+  branchType: 'SELECT' | 'UNION' | 'UNION ALL' | 'EXCEPT' | 'EXCEPT ALL' | 'INTERSECT' | 'INTERSECT ALL' | 'MINUS' | 'CTE';
+  branchLabel: string;
+  sql: string;
+}
+
+/**
+ * Splits SQL into top-level branches (CTEs and UNION/EXCEPT/INTERSECT branches)
+ * while respecting parentheses.
+ */
+function splitIntoBranches(cleanText: string): QueryBranch[] {
+  const branches: QueryBranch[] = [];
+
+  // Remove WITH clause from main body first if present
+  let mainBody = cleanText;
+  const withMatch = mainBody.match(/^\s*WITH\s+([\s\S]*?)\s*(SELECT|INSERT|UPDATE|DELETE|MERGE)/i);
+  if (withMatch) {
+    const withLength = withMatch[0].length - withMatch[2].length;
+    mainBody = mainBody.substring(withLength);
+  }
+
+  // Scan top-level set operators
+  let currentStart = 0;
+  let parenDepth = 0;
+  let currentBranchType: QueryBranch['branchType'] = 'SELECT';
+  let branchCount = 1;
+
+  for (let i = 0; i < mainBody.length; i++) {
+    const char = mainBody[i];
+    if (char === '(') {
+      parenDepth++;
+      continue;
+    }
+    if (char === ')') {
+      parenDepth = Math.max(0, parenDepth - 1);
+      continue;
+    }
+
+    if (parenDepth === 0) {
+      const remaining = mainBody.substring(i);
+      const opMatch = remaining.match(/^(\b(?:UNION\s+ALL|UNION(?:\s+DISTINCT)?|EXCEPT\s+ALL|EXCEPT|INTERSECT\s+ALL|INTERSECT|MINUS)\b)/i);
+      if (opMatch) {
+        const opStr = opMatch[1].toUpperCase().replace(/\s+/g, ' ');
+        const branchSql = mainBody.substring(currentStart, i).trim();
+        if (branchSql) {
+          branches.push({
+            branchIndex: branchCount,
+            branchType: currentBranchType,
+            branchLabel: branchCount === 1 ? 'Branch 1 (Initial SELECT)' : `Branch ${branchCount} (${currentBranchType})`,
+            sql: branchSql,
+          });
+          branchCount++;
+        }
+
+        if (opStr.includes('UNION ALL')) currentBranchType = 'UNION ALL';
+        else if (opStr.includes('UNION')) currentBranchType = 'UNION';
+        else if (opStr.includes('EXCEPT ALL')) currentBranchType = 'EXCEPT ALL';
+        else if (opStr.includes('EXCEPT') || opStr.includes('MINUS')) currentBranchType = 'EXCEPT';
+        else if (opStr.includes('INTERSECT ALL')) currentBranchType = 'INTERSECT ALL';
+        else if (opStr.includes('INTERSECT')) currentBranchType = 'INTERSECT';
+        else currentBranchType = 'UNION';
+
+        i += opMatch[1].length - 1;
+        currentStart = i + 1;
+      }
+    }
+  }
+
+  const lastBranchSql = mainBody.substring(currentStart).trim();
+  if (lastBranchSql) {
+    branches.push({
+      branchIndex: branchCount,
+      branchType: currentBranchType,
+      branchLabel: branchCount === 1 ? 'Branch 1 (Initial SELECT)' : `Branch ${branchCount} (${currentBranchType})`,
+      sql: lastBranchSql,
+    });
+  }
+
+  return branches;
+}
+
 /**
  * Main parser function to extract table graph, ON conditions on edges,
- * and WHERE conditions per node.
+ * and WHERE conditions per node, showing all occurrences across all UNION branches.
  */
 export function parseSqlTableGraph(sql: string): ParsedTableGraph {
   const trimmed = sql.trim();
@@ -156,6 +243,7 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
       globalWhereConditions: [],
       statementType: 'UNKNOWN',
       cteCount: 0,
+      branchCount: 0,
       hasErrors: false,
       rawSql: sql,
     };
@@ -178,8 +266,6 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
   const nodes: TableNodeData[] = [];
   const edges: TableEdgeData[] = [];
   const globalWhereConditions: string[] = [];
-  const tableAliasMap = new Map<string, string>(); // alias.toUpperCase() -> nodeId
-  const tableNameMap = new Map<string, string>(); // tableName.toUpperCase() -> nodeId
 
   // 1. Extract CTEs if present: WITH cte_name AS (SELECT ...)
   let cteCount = 0;
@@ -188,7 +274,7 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
   while ((cteMatch = cteRegex.exec(cleanText)) !== null) {
     cteCount++;
     const cteName = stripQuotes(cteMatch[1]);
-    const nodeId = `CTE_${cteName.toUpperCase()}`;
+    const nodeId = `CTE_${cteName.toUpperCase()}_${cteCount}`;
     const cteNode: TableNodeData = {
       id: nodeId,
       tableName: cteName,
@@ -200,10 +286,9 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
       columns: [],
       isRoot: false,
       orderIndex: nodes.length,
+      branchName: 'CTE Definition',
     };
     nodes.push(cteNode);
-    tableAliasMap.set(cteName.toUpperCase(), nodeId);
-    tableNameMap.set(cteName.toUpperCase(), nodeId);
   }
 
   // 2. Extract TARGET Table for INSERT / UPDATE / MERGE / DELETE
@@ -213,7 +298,7 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
       const rawTarget = targetMatch[1];
       const targetAlias = targetMatch[2] ? stripQuotes(targetMatch[2]) : '';
       const { schema, table, fullName } = parseSchemaAndTable(rawTarget);
-      const nodeId = `TARGET_${table.toUpperCase()}${targetAlias ? '_' + targetAlias : ''}`;
+      const nodeId = `TARGET_${table.toUpperCase()}${targetAlias ? '_' + targetAlias : ''}_${nodes.length}`;
 
       const targetNode: TableNodeData = {
         id: nodeId,
@@ -221,285 +306,344 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
         schemaName: schema,
         fullTableName: fullName,
         alias: targetAlias,
-        displayName: targetAlias ? `${fullName} (${targetAlias})` : fullName,
+        displayName: targetAlias ? `${fullName} (${targetAlias}) [TARGET]` : `${fullName} [TARGET]`,
         joinType: 'TARGET',
         whereConditions: [],
         columns: [],
         isRoot: true,
         orderIndex: nodes.length,
+        branchName: 'Target Table',
       };
 
       nodes.push(targetNode);
-      if (targetAlias) tableAliasMap.set(targetAlias.toUpperCase(), nodeId);
-      tableNameMap.set(table.toUpperCase(), nodeId);
-      tableNameMap.set(fullName.toUpperCase(), nodeId);
     }
   }
 
-  // 3. Extract FROM clause base table(s)
-  // Supports single table, aliased table, or comma separated tables
-  const fromMatch = cleanText.match(/\bFROM\s+([A-Za-z0-9_".]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"]+)?(?:\s*,\s*[A-Za-z0-9_".]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"]+)?)*)/i);
+  // 3. Decompose into Query Branches (e.g. UNION ALL, UNION, INTERSECT, etc.)
+  const branches = splitIntoBranches(cleanText);
+  const isMultiBranch = branches.length > 1;
 
-  if (fromMatch) {
-    const fromSection = fromMatch[1];
-    const commaTables = fromSection.split(/\s*,\s*/);
+  // Track branch root nodes to connect to UNION operator if multi-branch
+  const branchRootNodes: TableNodeData[] = [];
 
-    commaTables.forEach((entry, idx) => {
-      const trimmedEntry = entry.trim();
-      if (!trimmedEntry) return;
+  branches.forEach((branch) => {
+    const branchText = branch.sql;
+    const branchTableAliasMap = new Map<string, string>(); // alias.toUpperCase() -> nodeId
+    const branchTableNameMap = new Map<string, string>(); // tableName.toUpperCase() -> nodeId
+    const branchNodes: TableNodeData[] = [];
 
-      const parts = trimmedEntry.split(/\s+(?:AS\s+)?/i);
-      const rawTable = parts[0];
-      const alias = parts.length > 1 ? stripQuotes(parts[1]) : '';
-      const { schema, table, fullName } = parseSchemaAndTable(rawTable);
+    // 3a. Extract FROM clause base tables for this branch
+    // Matches: FROM table1 [AS t1], table2 [AS t2]
+    const fromMatch = branchText.match(/\bFROM\s+([A-Za-z0-9_".]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"]+)?(?:\s*,\s*[A-Za-z0-9_".]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"]+)?)*)/i);
 
-      if (['(', 'SELECT', 'LATERAL', 'UNNEST'].includes(table.toUpperCase())) return;
+    if (fromMatch) {
+      const fromSection = fromMatch[1];
+      const commaTables = fromSection.split(/\s*,\s*/);
 
-      const nodeId = `TBL_${table.toUpperCase()}${alias ? '_' + alias : `_${idx}`}`;
+      commaTables.forEach((entry, idx) => {
+        const trimmedEntry = entry.trim();
+        if (!trimmedEntry) return;
 
-      // Avoid duplicate root node if already added
-      if (!nodes.some((n) => n.id === nodeId)) {
+        const parts = trimmedEntry.split(/\s+(?:AS\s+)?/i);
+        const rawTable = parts[0];
+        const alias = parts.length > 1 ? stripQuotes(parts[1]) : '';
+        const { schema, table, fullName } = parseSchemaAndTable(rawTable);
+
+        if (['(', 'SELECT', 'LATERAL', 'UNNEST'].includes(table.toUpperCase())) return;
+
+        const occurrenceNumber = nodes.length + 1;
+        const nodeId = `TBL_B${branch.branchIndex}_${idx + 1}_${table.toUpperCase()}${alias ? '_' + alias : ''}_${occurrenceNumber}`;
+
+        const branchPrefix = isMultiBranch ? `[Branch ${branch.branchIndex}] ` : '';
+        const displayName = alias ? `${branchPrefix}${fullName} (${alias})` : `${branchPrefix}${fullName}`;
+
         const node: TableNodeData = {
           id: nodeId,
           tableName: table,
           schemaName: schema,
           fullTableName: fullName,
           alias,
-          displayName: alias ? `${fullName} (${alias})` : fullName,
+          displayName,
           joinType: idx === 0 ? 'FROM' : 'CROSS JOIN',
           whereConditions: [],
           columns: [],
           isRoot: idx === 0,
           orderIndex: nodes.length,
+          branchIndex: branch.branchIndex,
+          branchName: branch.branchLabel,
         };
+
         nodes.push(node);
-        if (alias) tableAliasMap.set(alias.toUpperCase(), nodeId);
-        tableNameMap.set(table.toUpperCase(), nodeId);
-        tableNameMap.set(fullName.toUpperCase(), nodeId);
-      }
-    });
-  }
+        branchNodes.push(node);
+        if (idx === 0) {
+          branchRootNodes.push(node);
+        }
 
-  // 4. Extract JOIN clauses (INNER, LEFT, RIGHT, FULL, CROSS) and their ON conditions
-  // Regex matches JOIN type, Table name, optional AS alias, and ON condition
-  const joinRegex = /\b(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN|JOIN)\s+([A-Za-z0-9_".]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_"]+))?(?:\s+ON\s+([\s\S]*?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|JOIN|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION)\b|$))?/gi;
+        if (alias) branchTableAliasMap.set(alias.toUpperCase(), nodeId);
+        branchTableNameMap.set(table.toUpperCase(), nodeId);
+        branchTableNameMap.set(fullName.toUpperCase(), nodeId);
+      });
+    }
 
-  let joinMatch: RegExpExecArray | null;
-  while ((joinMatch = joinRegex.exec(cleanText)) !== null) {
-    const rawJoinType = joinMatch[1].toUpperCase().replace(/\s+/g, ' ');
-    const rawTable = joinMatch[2];
-    const alias = joinMatch[3] ? stripQuotes(joinMatch[3]) : '';
-    const rawOnCondition = joinMatch[4] ? joinMatch[4].trim() : '';
+    // 3b. Extract JOIN clauses in this branch (INNER, LEFT, RIGHT, FULL, CROSS)
+    const joinRegex = /\b(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN|JOIN)\s+([A-Za-z0-9_".]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_"]+))?(?:\s+ON\s+([\s\S]*?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|JOIN|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT)\b|$))?/gi;
 
-    const { schema, table, fullName } = parseSchemaAndTable(rawTable);
-    if (['(', 'SELECT', 'LATERAL', 'UNNEST'].includes(table.toUpperCase())) continue;
+    let joinMatch: RegExpExecArray | null;
+    let joinIndex = 0;
+    while ((joinMatch = joinRegex.exec(branchText)) !== null) {
+      joinIndex++;
+      const rawJoinType = joinMatch[1].toUpperCase().replace(/\s+/g, ' ');
+      const rawTable = joinMatch[2];
+      const alias = joinMatch[3] ? stripQuotes(joinMatch[3]) : '';
+      const rawOnCondition = joinMatch[4] ? joinMatch[4].trim() : '';
 
-    let normalizedJoinType: TableNodeData['joinType'] = 'INNER JOIN';
-    if (rawJoinType.includes('LEFT')) normalizedJoinType = 'LEFT JOIN';
-    else if (rawJoinType.includes('RIGHT')) normalizedJoinType = 'RIGHT JOIN';
-    else if (rawJoinType.includes('FULL')) normalizedJoinType = 'FULL JOIN';
-    else if (rawJoinType.includes('CROSS')) normalizedJoinType = 'CROSS JOIN';
-    else normalizedJoinType = 'INNER JOIN';
+      const { schema, table, fullName } = parseSchemaAndTable(rawTable);
+      if (['(', 'SELECT', 'LATERAL', 'UNNEST'].includes(table.toUpperCase())) continue;
 
-    const nodeId = `TBL_${table.toUpperCase()}${alias ? '_' + alias : `_${nodes.length}`}`;
+      let normalizedJoinType: TableNodeData['joinType'] = 'INNER JOIN';
+      if (rawJoinType.includes('LEFT')) normalizedJoinType = 'LEFT JOIN';
+      else if (rawJoinType.includes('RIGHT')) normalizedJoinType = 'RIGHT JOIN';
+      else if (rawJoinType.includes('FULL')) normalizedJoinType = 'FULL JOIN';
+      else if (rawJoinType.includes('CROSS')) normalizedJoinType = 'CROSS JOIN';
+      else normalizedJoinType = 'INNER JOIN';
 
-    let targetNode = nodes.find((n) => n.id === nodeId);
-    if (!targetNode) {
-      targetNode = {
+      const occurrenceNumber = nodes.length + 1;
+      const nodeId = `TBL_B${branch.branchIndex}_J${joinIndex}_${table.toUpperCase()}${alias ? '_' + alias : ''}_${occurrenceNumber}`;
+
+      const branchPrefix = isMultiBranch ? `[Branch ${branch.branchIndex}] ` : '';
+      const displayName = alias ? `${branchPrefix}${fullName} (${alias})` : `${branchPrefix}${fullName}`;
+
+      const targetNode: TableNodeData = {
         id: nodeId,
         tableName: table,
         schemaName: schema,
         fullTableName: fullName,
         alias,
-        displayName: alias ? `${fullName} (${alias})` : fullName,
+        displayName,
         joinType: normalizedJoinType,
         whereConditions: [],
         columns: [],
         isRoot: false,
         orderIndex: nodes.length,
+        branchIndex: branch.branchIndex,
+        branchName: branch.branchLabel,
       };
+
       nodes.push(targetNode);
-      if (alias) tableAliasMap.set(alias.toUpperCase(), nodeId);
-      tableNameMap.set(table.toUpperCase(), nodeId);
-      tableNameMap.set(fullName.toUpperCase(), nodeId);
-    }
+      branchNodes.push(targetNode);
 
-    // Now analyze the ON condition to create an Edge
-    if (rawOnCondition) {
-      const restoredOnCondition = restoreStrings(rawOnCondition, strings).trim();
+      if (alias) branchTableAliasMap.set(alias.toUpperCase(), nodeId);
+      branchTableNameMap.set(table.toUpperCase(), nodeId);
+      branchTableNameMap.set(fullName.toUpperCase(), nodeId);
 
-      // Find referenced source tables in the ON condition
-      // Try to find which other table is being connected to
-      let sourceNodeId: string | null = null;
+      // Analyze ON Condition
+      if (rawOnCondition) {
+        const restoredOnCondition = restoreStrings(rawOnCondition, strings).trim();
 
-      // Extract all identifiers/aliases in the ON condition (e.g. `v."SALES_DOCUMENT" = p."SALES_DOCUMENT"`)
-      const idMatches = Array.from(rawOnCondition.matchAll(/([A-Za-z0-9_"]+)\s*\.\s*[A-Za-z0-9_"]+/g));
-      const referencedNodeIds = new Set<string>();
+        // Extract aliases or table names in the ON condition
+        const idMatches = Array.from(rawOnCondition.matchAll(/([A-Za-z0-9_"]+)\s*\.\s*[A-Za-z0-9_"]+/g));
+        const referencedNodeIds = new Set<string>();
 
-      for (const m of idMatches) {
-        const refAlias = stripQuotes(m[1]).toUpperCase();
-        if (tableAliasMap.has(refAlias)) {
-          referencedNodeIds.add(tableAliasMap.get(refAlias)!);
-        } else if (tableNameMap.has(refAlias)) {
-          referencedNodeIds.add(tableNameMap.get(refAlias)!);
-        }
-      }
-
-      // Remove the targetNode itself from referenced candidates
-      referencedNodeIds.delete(nodeId);
-
-      if (referencedNodeIds.size > 0) {
-        // Take the first matching other node as source
-        sourceNodeId = Array.from(referencedNodeIds)[0];
-      } else {
-        // Fallback: connect to the root node (first node) or previous node
-        const prevNode = nodes.find((n) => n.id !== nodeId && (n.isRoot || n.orderIndex < targetNode!.orderIndex));
-        sourceNodeId = prevNode ? prevNode.id : nodes[0]?.id || null;
-      }
-
-      if (sourceNodeId && sourceNodeId !== nodeId) {
-        const sourceNode = nodes.find((n) => n.id === sourceNodeId);
-        const edgeId = `EDGE_${sourceNodeId}_TO_${nodeId}_${edges.length}`;
-
-        // Break down sub-conditions if connected by AND
-        const subConditions = restoredOnCondition
-          .split(/\s+AND\s+/i)
-          .map((c) => c.trim())
-          .filter(Boolean);
-
-        edges.push({
-          id: edgeId,
-          sourceId: sourceNodeId,
-          targetId: nodeId,
-          sourceName: sourceNode?.fullTableName || sourceNodeId,
-          targetName: targetNode.fullTableName,
-          sourceAlias: sourceNode?.alias || '',
-          targetAlias: targetNode.alias,
-          joinType: normalizedJoinType,
-          onCondition: restoredOnCondition,
-          detailedConditions: subConditions.length > 0 ? subConditions : [restoredOnCondition],
-        });
-      }
-    } else if (normalizedJoinType === 'CROSS JOIN') {
-      // Cross join without explicit ON
-      const prevNode = nodes.find((n) => n.id !== nodeId);
-      if (prevNode) {
-        edges.push({
-          id: `EDGE_CROSS_${prevNode.id}_TO_${nodeId}`,
-          sourceId: prevNode.id,
-          targetId: nodeId,
-          sourceName: prevNode.fullTableName,
-          targetName: targetNode.fullTableName,
-          sourceAlias: prevNode.alias,
-          targetAlias: targetNode.alias,
-          joinType: 'CROSS JOIN',
-          onCondition: '(Cartesian Product / Cross Join)',
-          detailedConditions: ['CROSS JOIN: No explicit ON condition'],
-        });
-      }
-    }
-  }
-
-  // 5. Extract WHERE Clause and distribute table-specific predicates to nodes
-  const whereMatch = cleanText.match(/\bWHERE\s+([\s\S]*?)(?=\b(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|UNION|WINDOW)\b|$)/i);
-
-  if (whereMatch) {
-    const rawWhere = whereMatch[1].trim();
-    const restoredWhere = restoreStrings(rawWhere, strings);
-
-    // Split top-level conditions by AND (respecting parentheses)
-    const predicates = splitTopLevelAnd(restoredWhere);
-
-    for (const predicate of predicates) {
-      const cleanPred = predicate.trim();
-      if (!cleanPred) continue;
-
-      // Find which table aliases or table names are in this predicate
-      const referencedNodeIds = new Set<string>();
-
-      // Check for alias.column pattern: `v."STATUS" = 'A'` or `v.ORDER_DATE >= ...`
-      const aliasColMatches = Array.from(cleanPred.matchAll(/([A-Za-z0-9_"]+)\s*\.\s*[A-Za-z0-9_"]+/g));
-      for (const m of aliasColMatches) {
-        const ref = stripQuotes(m[1]).toUpperCase();
-        if (tableAliasMap.has(ref)) {
-          referencedNodeIds.add(tableAliasMap.get(ref)!);
-        } else if (tableNameMap.has(ref)) {
-          referencedNodeIds.add(tableNameMap.get(ref)!);
-        }
-      }
-
-      if (referencedNodeIds.size === 1) {
-        // Condition belongs uniquely to one table node!
-        const targetNodeId = Array.from(referencedNodeIds)[0];
-        const targetNode = nodes.find((n) => n.id === targetNodeId);
-        if (targetNode && !targetNode.whereConditions.includes(cleanPred)) {
-          targetNode.whereConditions.push(cleanPred);
-        }
-      } else if (referencedNodeIds.size > 1) {
-        // Multi-table comparison in WHERE (e.g. comma join condition `t1.id = t2.id`)
-        const nodeArray = Array.from(referencedNodeIds);
-        const node1 = nodes.find((n) => n.id === nodeArray[0]);
-        const node2 = nodes.find((n) => n.id === nodeArray[1]);
-
-        if (node1 && node2) {
-          // Check if an edge already exists
-          let existingEdge = edges.find(
-            (e) => (e.sourceId === node1.id && e.targetId === node2.id) || (e.sourceId === node2.id && e.targetId === node1.id)
-          );
-
-          if (!existingEdge) {
-            existingEdge = {
-              id: `EDGE_IMPLICIT_${node1.id}_${node2.id}`,
-              sourceId: node1.id,
-              targetId: node2.id,
-              sourceName: node1.fullTableName,
-              targetName: node2.fullTableName,
-              sourceAlias: node1.alias,
-              targetAlias: node2.alias,
-              joinType: 'WHERE JOIN (Implicit)',
-              onCondition: cleanPred,
-              detailedConditions: [cleanPred],
-            };
-            edges.push(existingEdge);
-          } else {
-            if (!existingEdge.detailedConditions.includes(cleanPred)) {
-              existingEdge.detailedConditions.push(cleanPred);
-              existingEdge.onCondition += ` AND ${cleanPred}`;
-            }
+        for (const m of idMatches) {
+          const refAlias = stripQuotes(m[1]).toUpperCase();
+          if (branchTableAliasMap.has(refAlias)) {
+            referencedNodeIds.add(branchTableAliasMap.get(refAlias)!);
+          } else if (branchTableNameMap.has(refAlias)) {
+            referencedNodeIds.add(branchTableNameMap.get(refAlias)!);
           }
         }
-        globalWhereConditions.push(cleanPred);
-      } else {
-        // Unqualified column or expression with 1 table in query -> assign to root/single table
-        if (nodes.length === 1) {
-          nodes[0].whereConditions.push(cleanPred);
+
+        referencedNodeIds.delete(nodeId);
+
+        let sourceNodeId: string | null = null;
+        if (referencedNodeIds.size > 0) {
+          sourceNodeId = Array.from(referencedNodeIds)[0];
         } else {
-          globalWhereConditions.push(cleanPred);
+          // Default to the first table of this branch
+          sourceNodeId = branchNodes[0]?.id || null;
+        }
+
+        if (sourceNodeId && sourceNodeId !== nodeId) {
+          const sourceNode = nodes.find((n) => n.id === sourceNodeId);
+          const edgeId = `EDGE_${sourceNodeId}_TO_${nodeId}_${edges.length}`;
+
+          const subConditions = restoredOnCondition
+            .split(/\s+AND\s+/i)
+            .map((c) => c.trim())
+            .filter(Boolean);
+
+          edges.push({
+            id: edgeId,
+            sourceId: sourceNodeId,
+            targetId: nodeId,
+            sourceName: sourceNode?.displayName || sourceNodeId,
+            targetName: targetNode.displayName,
+            sourceAlias: sourceNode?.alias || '',
+            targetAlias: targetNode.alias,
+            joinType: normalizedJoinType,
+            onCondition: restoredOnCondition,
+            detailedConditions: subConditions.length > 0 ? subConditions : [restoredOnCondition],
+          });
+        }
+      } else if (normalizedJoinType === 'CROSS JOIN') {
+        const prevNode = branchNodes[0];
+        if (prevNode && prevNode.id !== nodeId) {
+          edges.push({
+            id: `EDGE_CROSS_${prevNode.id}_TO_${nodeId}`,
+            sourceId: prevNode.id,
+            targetId: nodeId,
+            sourceName: prevNode.displayName,
+            targetName: targetNode.displayName,
+            sourceAlias: prevNode.alias,
+            targetAlias: targetNode.alias,
+            joinType: 'CROSS JOIN',
+            onCondition: '(Cartesian Product / Cross Join)',
+            detailedConditions: ['CROSS JOIN: No explicit ON condition'],
+          });
         }
       }
     }
-  }
 
-  // 6. Extract Column References and attribute to nodes
-  const colRefMatches = Array.from(cleanText.matchAll(/([A-Za-z0-9_"]+)\s*\.\s*([A-Za-z0-9_"]+)/g));
-  for (const m of colRefMatches) {
-    const alias = stripQuotes(m[1]).toUpperCase();
-    const col = stripQuotes(m[2]);
+    // 3c. Extract WHERE Clause for this specific branch
+    const whereMatch = branchText.match(/\bWHERE\s+([\s\S]*?)(?=\b(?:GROUP\s+BY|HAVING|ORDER\s+BY|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT|WINDOW)\b|$)/i);
 
-    let targetNodeId: string | undefined;
-    if (tableAliasMap.has(alias)) targetNodeId = tableAliasMap.get(alias);
-    else if (tableNameMap.has(alias)) targetNodeId = tableNameMap.get(alias);
+    if (whereMatch) {
+      const rawWhere = whereMatch[1].trim();
+      const restoredWhere = restoreStrings(rawWhere, strings);
+      const predicates = splitTopLevelAnd(restoredWhere);
 
-    if (targetNodeId) {
-      const node = nodes.find((n) => n.id === targetNodeId);
-      if (node && !node.columns.includes(col)) {
-        node.columns.push(col);
+      for (const predicate of predicates) {
+        const cleanPred = predicate.trim();
+        if (!cleanPred) continue;
+
+        const referencedNodeIds = new Set<string>();
+
+        // Check alias.col or table.col in this branch
+        const aliasColMatches = Array.from(cleanPred.matchAll(/([A-Za-z0-9_"]+)\s*\.\s*[A-Za-z0-9_"]+/g));
+        for (const m of aliasColMatches) {
+          const ref = stripQuotes(m[1]).toUpperCase();
+          if (branchTableAliasMap.has(ref)) {
+            referencedNodeIds.add(branchTableAliasMap.get(ref)!);
+          } else if (branchTableNameMap.has(ref)) {
+            referencedNodeIds.add(branchTableNameMap.get(ref)!);
+          }
+        }
+
+        if (referencedNodeIds.size === 1) {
+          const targetNodeId = Array.from(referencedNodeIds)[0];
+          const targetNode = branchNodes.find((n) => n.id === targetNodeId);
+          if (targetNode && !targetNode.whereConditions.includes(cleanPred)) {
+            targetNode.whereConditions.push(cleanPred);
+          }
+        } else if (referencedNodeIds.size > 1) {
+          // Multi-table comparison in WHERE (implicit join in this branch)
+          const nodeArray = Array.from(referencedNodeIds);
+          const node1 = branchNodes.find((n) => n.id === nodeArray[0]);
+          const node2 = branchNodes.find((n) => n.id === nodeArray[1]);
+
+          if (node1 && node2) {
+            let existingEdge = edges.find(
+              (e) => (e.sourceId === node1.id && e.targetId === node2.id) || (e.sourceId === node2.id && e.targetId === node1.id)
+            );
+
+            if (!existingEdge) {
+              existingEdge = {
+                id: `EDGE_IMPLICIT_${node1.id}_${node2.id}`,
+                sourceId: node1.id,
+                targetId: node2.id,
+                sourceName: node1.displayName,
+                targetName: node2.displayName,
+                sourceAlias: node1.alias,
+                targetAlias: node2.alias,
+                joinType: 'WHERE JOIN (Implicit)',
+                onCondition: cleanPred,
+                detailedConditions: [cleanPred],
+              };
+              edges.push(existingEdge);
+            } else {
+              if (!existingEdge.detailedConditions.includes(cleanPred)) {
+                existingEdge.detailedConditions.push(cleanPred);
+                existingEdge.onCondition += ` AND ${cleanPred}`;
+              }
+            }
+          }
+          globalWhereConditions.push(isMultiBranch ? `[Branch ${branch.branchIndex}] ${cleanPred}` : cleanPred);
+        } else {
+          // Unqualified predicate -> if branch has 1 table, attribute to it
+          if (branchNodes.length === 1) {
+            branchNodes[0].whereConditions.push(cleanPred);
+          } else {
+            globalWhereConditions.push(isMultiBranch ? `[Branch ${branch.branchIndex}] ${cleanPred}` : cleanPred);
+          }
+        }
       }
     }
+
+    // 3d. Attribute column references in this branch
+    const colRefMatches = Array.from(branchText.matchAll(/([A-Za-z0-9_"]+)\s*\.\s*([A-Za-z0-9_"]+)/g));
+    for (const m of colRefMatches) {
+      const alias = stripQuotes(m[1]).toUpperCase();
+      const col = stripQuotes(m[2]);
+
+      let targetNodeId: string | undefined;
+      if (branchTableAliasMap.has(alias)) targetNodeId = branchTableAliasMap.get(alias);
+      else if (branchTableNameMap.has(alias)) targetNodeId = branchTableNameMap.get(alias);
+
+      if (targetNodeId) {
+        const node = branchNodes.find((n) => n.id === targetNodeId);
+        if (node && !node.columns.includes(col)) {
+          node.columns.push(col);
+        }
+      }
+    }
+  });
+
+  // 4. If multi-branch (UNION / UNION ALL / INTERSECT / EXCEPT), create a UNION combiner node
+  if (isMultiBranch) {
+    const unionType = branches[1]?.branchType || 'UNION ALL';
+    const unionNodeId = `OP_UNION_RESULT_${nodes.length}`;
+    const unionNode: TableNodeData = {
+      id: unionNodeId,
+      tableName: unionType,
+      fullTableName: `${unionType} Output`,
+      alias: '',
+      displayName: `${unionType} (${branches.length} Branches)`,
+      joinType: unionType.includes('UNION ALL') ? 'UNION ALL' : 'UNION',
+      whereConditions: [],
+      columns: [],
+      isRoot: false,
+      orderIndex: nodes.length,
+      branchName: 'Set Operation Combiner',
+      isOperator: true,
+    };
+
+    nodes.push(unionNode);
+
+    // Connect the last table of each branch to the UNION node
+    branches.forEach((branch) => {
+      const branchNodesList = nodes.filter((n) => n.branchIndex === branch.branchIndex && !n.isOperator);
+      const lastBranchNode = branchNodesList[branchNodesList.length - 1];
+
+      if (lastBranchNode) {
+        edges.push({
+          id: `EDGE_UNION_B${branch.branchIndex}_TO_COMBINER`,
+          sourceId: lastBranchNode.id,
+          targetId: unionNode.id,
+          sourceName: lastBranchNode.displayName,
+          targetName: unionNode.displayName,
+          sourceAlias: lastBranchNode.alias,
+          targetAlias: '',
+          joinType: branch.branchIndex === 1 ? 'INPUT (Initial)' : `INPUT (${branch.branchType})`,
+          onCondition: `Feeds into ${unionType} output`,
+          detailedConditions: [`Branch ${branch.branchIndex} dataset concatenated into ${unionType}`],
+          isUnionEdge: true,
+        });
+      }
+    });
   }
 
-  // Calculate layout positions (DAG topological left-to-right hierarchy)
-  calculateNodeLayoutPositions(nodes, edges);
+  // Calculate layout coordinates with clean spacing for parallel branches
+  calculateNodeLayoutPositions(nodes, edges, isMultiBranch);
 
   return {
     nodes,
@@ -507,6 +651,7 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
     globalWhereConditions,
     statementType,
     cteCount,
+    branchCount: branches.length,
     hasErrors: false,
     rawSql: sql,
   };
@@ -577,85 +722,128 @@ function splitTopLevelAnd(whereSql: string): string[] {
 
 /**
  * Calculates responsive geometric coordinates for graph layout
+ * Organizes multiple branches into dedicated parallel rows for crystal clear hierarchy.
  */
-function calculateNodeLayoutPositions(nodes: TableNodeData[], edges: TableEdgeData[]) {
+function calculateNodeLayoutPositions(nodes: TableNodeData[], edges: TableEdgeData[], isMultiBranch: boolean) {
   if (nodes.length === 0) return;
 
-  const nodeWidth = 320;
-  const nodeHeight = 220;
+  const nodeWidth = 330;
+  const nodeHeight = 230;
   const horizontalGap = 160;
-  const verticalGap = 40;
+  const branchRowGap = 60;
 
-  // Build in-degree map for topological layering
-  const inDegree = new Map<string, number>();
-  const adj = new Map<string, string[]>();
+  if (isMultiBranch) {
+    // Multi-branch layout: Each branch occupies its own horizontal lane (row band)
+    const branchMap = new Map<number, TableNodeData[]>();
+    let operatorNode: TableNodeData | null = null;
 
-  nodes.forEach((n) => {
-    inDegree.set(n.id, 0);
-    adj.set(n.id, []);
-  });
+    nodes.forEach((n) => {
+      if (n.isOperator) {
+        operatorNode = n;
+      } else {
+        const bIdx = n.branchIndex || 1;
+        if (!branchMap.has(bIdx)) {
+          branchMap.set(bIdx, []);
+        }
+        branchMap.get(bIdx)!.push(n);
+      }
+    });
 
-  edges.forEach((e) => {
-    inDegree.set(e.targetId, (inDegree.get(e.targetId) || 0) + 1);
-    adj.get(e.sourceId)?.push(e.targetId);
-  });
+    const startX = 80;
+    let currentY = 80;
+    let maxBranchX = startX;
 
-  // Assign layers (ranks)
-  const layers: Map<string, number> = new Map();
-  const queue: string[] = [];
+    const sortedBranches = Array.from(branchMap.keys()).sort((a, b) => a - b);
 
-  nodes.forEach((n) => {
-    if ((inDegree.get(n.id) || 0) === 0 || n.isRoot) {
-      layers.set(n.id, 0);
-      queue.push(n.id);
+    sortedBranches.forEach((bIdx) => {
+      const branchNodes = branchMap.get(bIdx)!;
+
+      // Group nodes within this branch by in-degree / order
+      branchNodes.forEach((node, idxInBranch) => {
+        const x = startX + idxInBranch * (nodeWidth + horizontalGap);
+        const y = currentY;
+        node.x = x;
+        node.y = y;
+        maxBranchX = Math.max(maxBranchX, x + nodeWidth);
+      });
+
+      currentY += nodeHeight + branchRowGap;
+    });
+
+    // Position operator node (UNION ALL combiner) to the right, centered vertically
+    if (operatorNode) {
+      const totalGraphHeight = currentY - branchRowGap - 80;
+      operatorNode.x = maxBranchX + horizontalGap;
+      operatorNode.y = Math.max(80, 80 + (totalGraphHeight - nodeHeight) / 2);
     }
-  });
+  } else {
+    // Standard DAG topological layout
+    const inDegree = new Map<string, number>();
+    const adj = new Map<string, string[]>();
 
-  if (queue.length === 0 && nodes.length > 0) {
-    layers.set(nodes[0].id, 0);
-    queue.push(nodes[0].id);
-  }
+    nodes.forEach((n) => {
+      inDegree.set(n.id, 0);
+      adj.set(n.id, []);
+    });
 
-  while (queue.length > 0) {
-    const currentId = queue.shift()!;
-    const currentLayer = layers.get(currentId) || 0;
+    edges.forEach((e) => {
+      inDegree.set(e.targetId, (inDegree.get(e.targetId) || 0) + 1);
+      adj.get(e.sourceId)?.push(e.targetId);
+    });
 
-    const neighbors = adj.get(currentId) || [];
-    for (const neighborId of neighbors) {
-      const neighborLayer = layers.get(neighborId);
-      if (neighborLayer === undefined || neighborLayer < currentLayer + 1) {
-        layers.set(neighborId, currentLayer + 1);
-        queue.push(neighborId);
+    const layers: Map<string, number> = new Map();
+    const queue: string[] = [];
+
+    nodes.forEach((n) => {
+      if ((inDegree.get(n.id) || 0) === 0 || n.isRoot) {
+        layers.set(n.id, 0);
+        queue.push(n.id);
+      }
+    });
+
+    if (queue.length === 0 && nodes.length > 0) {
+      layers.set(nodes[0].id, 0);
+      queue.push(nodes[0].id);
+    }
+
+    while (queue.length > 0) {
+      const currentId = queue.shift()!;
+      const currentLayer = layers.get(currentId) || 0;
+
+      const neighbors = adj.get(currentId) || [];
+      for (const neighborId of neighbors) {
+        const neighborLayer = layers.get(neighborId);
+        if (neighborLayer === undefined || neighborLayer < currentLayer + 1) {
+          layers.set(neighborId, currentLayer + 1);
+          queue.push(neighborId);
+        }
       }
     }
-  }
 
-  // Group nodes by layer
-  const layerGroups = new Map<number, TableNodeData[]>();
-  nodes.forEach((n) => {
-    const layer = layers.get(n.id) ?? n.orderIndex;
-    if (!layerGroups.has(layer)) {
-      layerGroups.set(layer, []);
-    }
-    layerGroups.get(layer)!.push(n);
-  });
-
-  // Calculate X, Y positions for each node
-  const startX = 80;
-  const startY = 80;
-
-  const sortedLayers = Array.from(layerGroups.keys()).sort((a, b) => a - b);
-  sortedLayers.forEach((layerIdx) => {
-    const group = layerGroups.get(layerIdx)!;
-    const x = startX + layerIdx * (nodeWidth + horizontalGap);
-
-    const totalHeight = group.length * nodeHeight + (group.length - 1) * verticalGap;
-    const layerStartY = Math.max(startY, startY + (300 - totalHeight) / 2);
-
-    group.forEach((node, idx) => {
-      const y = layerStartY + idx * (nodeHeight + verticalGap);
-      node.x = x;
-      node.y = y;
+    const layerGroups = new Map<number, TableNodeData[]>();
+    nodes.forEach((n) => {
+      const layer = layers.get(n.id) ?? n.orderIndex;
+      if (!layerGroups.has(layer)) {
+        layerGroups.set(layer, []);
+      }
+      layerGroups.get(layer)!.push(n);
     });
-  });
+
+    const startX = 80;
+    const startY = 80;
+    const sortedLayers = Array.from(layerGroups.keys()).sort((a, b) => a - b);
+
+    sortedLayers.forEach((layerIdx) => {
+      const group = layerGroups.get(layerIdx)!;
+      const x = startX + layerIdx * (nodeWidth + horizontalGap);
+      const totalHeight = group.length * nodeHeight + (group.length - 1) * branchRowGap;
+      const layerStartY = Math.max(startY, startY + (300 - totalHeight) / 2);
+
+      group.forEach((node, idx) => {
+        const y = layerStartY + idx * (nodeHeight + branchRowGap);
+        node.x = x;
+        node.y = y;
+      });
+    });
+  }
 }

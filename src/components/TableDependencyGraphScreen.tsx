@@ -370,14 +370,21 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
 
           {/* Query Stats Badges */}
           <div className="hidden lg:flex items-center gap-2 text-xs font-mono">
+            {parsedGraph.branchCount > 1 && (
+              <span className="px-2 py-1 bg-fuchsia-50 text-fuchsia-800 rounded-md border border-fuchsia-200 flex items-center gap-1.5 font-semibold">
+                <Workflow className="w-3.5 h-3.5 text-fuchsia-600" />
+                <span>{parsedGraph.branchCount} UNION Branches</span>
+              </span>
+            )}
+
             <span className="px-2 py-1 bg-slate-100 text-slate-700 rounded-md border border-slate-200 flex items-center gap-1.5 font-semibold">
               <Database className="w-3.5 h-3.5 text-blue-600" />
-              <span>{parsedGraph.nodes.length} Tables</span>
+              <span>{parsedGraph.nodes.filter(n => !n.isOperator).length} Table Occurrences</span>
             </span>
 
             <span className="px-2 py-1 bg-slate-100 text-slate-700 rounded-md border border-slate-200 flex items-center gap-1.5 font-semibold">
               <Link2 className="w-3.5 h-3.5 text-emerald-600" />
-              <span>{parsedGraph.edges.length} Joins (ON)</span>
+              <span>{parsedGraph.edges.length} Connections</span>
             </span>
 
             <span className="px-2 py-1 bg-slate-100 text-slate-700 rounded-md border border-slate-200 flex items-center gap-1.5 font-semibold">
@@ -549,6 +556,52 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                 const isSelected = selectedNodeId === node.id;
                 const isMatched = !searchQuery || filteredNodes.some((fn) => fn.id === node.id);
 
+                // Special rendering for Set Operator Combiner (e.g. UNION ALL, UNION)
+                if (node.isOperator) {
+                  return (
+                    <div
+                      key={node.id}
+                      id={`table-node-${node.id}`}
+                      onMouseDown={(e) => handleNodeMouseDown(e, node.id)}
+                      style={{
+                        transform: `translate(${pos.x}px, ${pos.y}px)`,
+                        width: '320px',
+                      }}
+                      className={`graph-node absolute z-10 bg-white rounded-xl border-2 transition-shadow cursor-grab active:cursor-grabbing select-none ${
+                        isSelected
+                          ? 'border-[#e20074] shadow-xl ring-2 ring-[#e20074]/30'
+                          : 'border-fuchsia-300 hover:border-fuchsia-400 shadow-md hover:shadow-lg'
+                      } ${!isMatched ? 'opacity-30' : 'opacity-100'}`}
+                    >
+                      <div className="p-3 bg-fuchsia-50/80 border-b border-fuchsia-100 rounded-t-xl flex items-center justify-between">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <div className="w-6 h-6 rounded-md bg-fuchsia-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
+                            <Workflow className="w-3.5 h-3.5" />
+                          </div>
+                          <div className="min-w-0">
+                            <span className="font-bold text-xs text-fuchsia-950 truncate block">
+                              {node.displayName}
+                            </span>
+                            <span className="text-[10px] text-fuchsia-700 font-mono">
+                              Set Operation Output
+                            </span>
+                          </div>
+                        </div>
+
+                        <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-fuchsia-100 text-fuchsia-800 border border-fuchsia-300 shrink-0">
+                          {node.joinType}
+                        </span>
+                      </div>
+
+                      <div className="p-3 space-y-2 text-xs">
+                        <div className="p-2.5 bg-fuchsia-50/50 rounded-lg border border-fuchsia-100 text-[11px] text-fuchsia-900 leading-relaxed">
+                          Concatenates data from all <strong>{parsedGraph.branchCount}</strong> query branches into a unified result set.
+                        </div>
+                      </div>
+                    </div>
+                  );
+                }
+
                 return (
                   <div
                     key={node.id}
@@ -571,7 +624,7 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                           <Database className="w-3.5 h-3.5" />
                         </div>
                         <div className="min-w-0">
-                          <div className="flex items-center gap-1.5">
+                          <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="font-bold text-xs text-slate-900 truncate" title={node.tableName}>
                               {node.tableName}
                             </span>
@@ -581,7 +634,13 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                               </span>
                             )}
                           </div>
-                          {node.schemaName && (
+                          {node.branchName && parsedGraph.branchCount > 1 && (
+                            <div className="text-[10px] text-[#e20074] font-semibold flex items-center gap-1 mt-0.5">
+                              <span className="w-1.5 h-1.5 rounded-full bg-[#e20074]" />
+                              <span>{node.branchName}</span>
+                            </div>
+                          )}
+                          {node.schemaName && !node.branchName && (
                             <div className="text-[10px] text-slate-500 font-mono truncate">
                               Schema: {node.schemaName}
                             </div>
@@ -600,6 +659,8 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                             ? 'bg-purple-50 text-purple-700 border-purple-200'
                             : node.joinType === 'TARGET'
                             ? 'bg-rose-50 text-rose-700 border-rose-200'
+                            : node.joinType.includes('UNION')
+                            ? 'bg-fuchsia-50 text-fuchsia-700 border-fuchsia-200'
                             : 'bg-emerald-50 text-emerald-700 border-emerald-200'
                         }`}
                       >
