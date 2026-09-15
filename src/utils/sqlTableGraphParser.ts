@@ -128,10 +128,11 @@ function restoreStrings(text: string, strings: string[]): string {
 }
 
 /**
- * Clean identifier: removes quotes, brackets
+ * Clean identifier: removes quotes, brackets, backticks
  */
 function stripQuotes(id: string): string {
-  return id.replace(/^["'`]|["'`]$/g, '').trim();
+  if (!id) return '';
+  return id.replace(/^["'`\[\]]+|["'`\[\]]+$/g, '').trim();
 }
 
 /**
@@ -145,7 +146,8 @@ function parseSchemaAndTable(rawName: string): { schema?: string; table: string;
     const table = stripQuotes(parts[1]);
     return { schema, table, fullName: clean };
   }
-  return { table: stripQuotes(clean), fullName: clean };
+  const table = stripQuotes(clean);
+  return { schema: undefined, table, fullName: clean };
 }
 
 interface QueryBranch {
@@ -293,7 +295,7 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
 
   // 2. Extract TARGET Table for INSERT / UPDATE / MERGE / DELETE
   if (statementType === 'INSERT' || statementType === 'UPDATE' || statementType === 'MERGE') {
-    const targetMatch = cleanText.match(/\b(?:INTO|UPDATE|MERGE\s+INTO)\s+([A-Za-z0-9_".]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_"]+))?/i);
+    const targetMatch = cleanText.match(/\b(?:INTO|UPDATE|MERGE\s+INTO)\s+([A-Za-z0-9_".`\/\[\]-]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_"`\[\]-]+))?/i);
     if (targetMatch) {
       const rawTarget = targetMatch[1];
       const targetAlias = targetMatch[2] ? stripQuotes(targetMatch[2]) : '';
@@ -334,7 +336,7 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
 
     // 3a. Extract FROM clause base tables for this branch
     // Matches: FROM table1 [AS t1], table2 [AS t2]
-    const fromMatch = branchText.match(/\bFROM\s+([A-Za-z0-9_".]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"]+)?(?:\s*,\s*[A-Za-z0-9_".]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"]+)?)*)/i);
+    const fromMatch = branchText.match(/\bFROM\s+([A-Za-z0-9_".`\/\[\]-]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"`\[\]-]+)?(?:\s*,\s*[A-Za-z0-9_".`\/\[\]-]+(?:\s+(?:AS\s+)?[A-Za-z0-9_"`\[\]-]+)?)*)/i);
 
     if (fromMatch) {
       const fromSection = fromMatch[1];
@@ -386,7 +388,7 @@ export function parseSqlTableGraph(sql: string): ParsedTableGraph {
     }
 
     // 3b. Extract JOIN clauses in this branch (INNER, LEFT, RIGHT, FULL, CROSS)
-    const joinRegex = /\b(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN|JOIN)\s+([A-Za-z0-9_".]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_"]+))?(?:\s+ON\s+([\s\S]*?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|JOIN|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT)\b|$))?/gi;
+    const joinRegex = /\b(INNER\s+JOIN|LEFT\s+(?:OUTER\s+)?JOIN|RIGHT\s+(?:OUTER\s+)?JOIN|FULL\s+(?:OUTER\s+)?JOIN|CROSS\s+JOIN|JOIN)\s+([A-Za-z0-9_".`\/\[\]-]+)(?:\s+(?:AS\s+)?([A-Za-z0-9_"`\[\]-]+))?(?:\s+ON\s+([\s\S]*?)(?=\b(?:INNER|LEFT|RIGHT|FULL|CROSS|JOIN|WHERE|GROUP|HAVING|ORDER|LIMIT|OFFSET|UNION|EXCEPT|INTERSECT)\b|$))?/gi;
 
     let joinMatch: RegExpExecArray | null;
     let joinIndex = 0;

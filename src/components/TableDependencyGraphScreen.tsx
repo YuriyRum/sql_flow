@@ -628,8 +628,8 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                             Table Name
                           </div>
                           <div className="flex items-center gap-1.5 flex-wrap">
-                            <span className="font-bold text-xs text-slate-900 truncate font-mono" title={node.fullTableName || node.tableName}>
-                              {node.fullTableName || node.tableName}
+                            <span className="font-bold text-xs text-slate-900 truncate font-mono" title={node.tableName}>
+                              {node.tableName}
                             </span>
                             {node.alias && (
                               <span className="px-1.5 py-0.2 bg-blue-100 text-blue-800 rounded text-[10px] font-mono font-bold border border-blue-200">
@@ -637,15 +637,17 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                               </span>
                             )}
                           </div>
+                          <div className="text-[10px] text-slate-500 font-mono truncate mt-0.5">
+                            {node.schemaName ? (
+                              <span>Schema: <strong className="text-slate-700">{node.schemaName}</strong></span>
+                            ) : (
+                              <span className="text-slate-400 italic">(No schema)</span>
+                            )}
+                          </div>
                           {node.branchName && parsedGraph.branchCount > 1 && (
                             <div className="text-[10px] text-[#e20074] font-semibold flex items-center gap-1 mt-0.5">
                               <span className="w-1.5 h-1.5 rounded-full bg-[#e20074]" />
                               <span>{node.branchName}</span>
-                            </div>
-                          )}
-                          {node.schemaName && !node.branchName && (
-                            <div className="text-[10px] text-slate-500 font-mono truncate">
-                              Schema: {node.schemaName}
                             </div>
                           )}
                         </div>
@@ -763,17 +765,32 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                     <div className="text-[10px] font-bold text-slate-400 uppercase tracking-wider mb-1">
                       Table Identification
                     </div>
-                    <div className="bg-slate-50 rounded-xl p-3 border border-slate-200">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="text-xs font-bold text-slate-900">{selectedNode.fullTableName}</span>
-                        {selectedNode.alias && (
+                    <div className="bg-slate-50 rounded-xl p-3 border border-slate-200 space-y-1.5">
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-slate-500 font-medium">Table Name:</span>
+                        <span className="text-xs font-bold font-mono text-slate-900">{selectedNode.tableName}</span>
+                      </div>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-slate-500 font-medium">Schema:</span>
+                        <span className="text-xs font-mono text-slate-700">
+                          {selectedNode.schemaName ? selectedNode.schemaName : <em className="text-slate-400 font-normal">(No schema)</em>}
+                        </span>
+                      </div>
+                      {selectedNode.alias && (
+                        <div className="flex items-center justify-between">
+                          <span className="text-[11px] text-slate-500 font-medium">Alias:</span>
                           <span className="px-1.5 py-0.5 bg-[#fdf0f6] text-[#e20074] rounded text-[10px] font-mono font-bold">
                             AS {selectedNode.alias}
                           </span>
-                        )}
+                        </div>
+                      )}
+                      <div className="flex items-center justify-between pt-1 border-t border-slate-200">
+                        <span className="text-[11px] text-slate-500 font-medium">Full Reference:</span>
+                        <span className="text-xs font-mono text-slate-800 font-semibold">{selectedNode.fullTableName}</span>
                       </div>
-                      <div className="text-[11px] text-slate-500 font-mono">
-                        Join Role: <strong className="text-slate-800">{selectedNode.joinType}</strong>
+                      <div className="flex items-center justify-between">
+                        <span className="text-[11px] text-slate-500 font-medium">Join Role:</span>
+                        <strong className="text-xs font-mono text-slate-800">{selectedNode.joinType}</strong>
                       </div>
                     </div>
                   </div>
