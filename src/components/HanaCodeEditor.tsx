@@ -6,6 +6,10 @@ import {
   HANA_BUILTIN_FUNCTIONS,
 } from '../utils/hanaSqlValidator';
 import {
+  autoUppercaseKeywordAtPosition,
+  autoUppercaseSqlKeywords,
+} from '../utils/sqlKeywordFormatter';
+import {
   AlertCircle,
   AlertTriangle,
   Search,
@@ -18,6 +22,7 @@ interface HanaCodeEditorProps {
   diagnostics: SyntaxDiagnostic[];
   placeholder?: string;
   readOnly?: boolean;
+  autoUppercaseKeywords?: boolean;
   onCursorChange?: (line: number, col: number) => void;
   onUndo?: () => void;
   onRedo?: () => void;
@@ -32,6 +37,7 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
   diagnostics,
   placeholder,
   readOnly = false,
+  autoUppercaseKeywords = true,
   onCursorChange,
   onUndo,
   onRedo,
@@ -183,14 +189,98 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
       e.preventDefault();
       const start = e.currentTarget.selectionStart;
       const end = e.currentTarget.selectionEnd;
-      const newValue = value.substring(0, start) + '    ' + value.substring(end);
+
+      let baseVal = value;
+      let baseStart = start;
+      if (autoUppercaseKeywords && start > 0) {
+        const res = autoUppercaseKeywordAtPosition(value + ' ', start + 1);
+        if (res) {
+          baseVal = res.newSql.slice(0, -1);
+        }
+      }
+
+      const newValue = baseVal.substring(0, baseStart) + '    ' + baseVal.substring(end);
       onChange(newValue);
 
       setTimeout(() => {
         if (textareaRef.current) {
-          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = start + 4;
+          textareaRef.current.selectionStart = textareaRef.current.selectionEnd = baseStart + 4;
         }
       }, 0);
+    }
+  };
+
+  // Handle text input with instant keyword auto-capitalization on delimiters
+  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const rawValue = e.target.value;
+    const cursor = e.target.selectionStart;
+
+    if (autoUppercaseKeywords && cursor !== null && cursor > 0) {
+      // 1. Check if delimiter was just entered or typed
+      const uppercaseResult = autoUppercaseKeywordAtPosition(rawValue, cursor);
+      if (uppercaseResult) {
+        onChange(uppercaseResult.newSql);
+        const targetPos = uppercaseResult.newCursor;
+        requestAnimationFrame(() => {
+          if (textareaRef.current) {
+            textareaRef.current.setSelectionRange(targetPos, targetPos);
+          }
+        });
+        updateCursorPos();
+        return;
+      }
+
+      // 2. If multi-character change (e.g. pasted or inserted via IME/autocomplete)
+      if (Math.abs(rawValue.length - value.length) > 1) {
+        const transformed = autoUppercaseSqlKeywords(rawValue);
+        if (transformed !== rawValue) {
+          onChange(transformed);
+          requestAnimationFrame(() => {
+            if (textareaRef.current) {
+              textareaRef.current.setSelectionRange(cursor, cursor);
+            }
+          });
+          updateCursorPos();
+          return;
+        }
+      }
+    }
+
+    onChange(rawValue);
+    updateCursorPos();
+  };
+
+  // Handle clipboard paste to automatically capitalize keywords
+  const handlePaste = (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
+    if (!autoUppercaseKeywords) return;
+    const pasted = e.clipboardData.getData('text');
+    if (!pasted) return;
+
+    const transformed = autoUppercaseSqlKeywords(pasted);
+    if (transformed !== pasted) {
+      e.preventDefault();
+      const textarea = e.currentTarget;
+      const start = textarea.selectionStart;
+      const end = textarea.selectionEnd;
+      const val = value;
+      const nextVal = val.substring(0, start) + transformed + val.substring(end);
+      onChange(nextVal);
+      const newPos = start + transformed.length;
+      setTimeout(() => {
+        if (textareaRef.current) {
+          textareaRef.current.setSelectionRange(newPos, newPos);
+        }
+      }, 0);
+    }
+  };
+
+  // Ensure trailing lowercase keyword at EOF or before blur is capitalized
+  const handleBlur = () => {
+    if (autoUppercaseKeywords) {
+      const uppercased = autoUppercaseSqlKeywords(value);
+      if (uppercased !== value) {
+        onChange(uppercased);
+      }
     }
   };
 
@@ -491,10 +581,9 @@ export const HanaCodeEditor: React.FC<HanaCodeEditorProps> = ({
             ref={textareaRef}
             id="hana-sql-textarea"
             value={value}
-            onChange={(e) => {
-              onChange(e.target.value);
-              updateCursorPos();
-            }}
+            onChange={handleTextChange}
+            onPaste={handlePaste}
+            onBlur={handleBlur}
             onKeyUp={updateCursorPos}
             onClick={updateCursorPos}
             onScroll={handleScroll}

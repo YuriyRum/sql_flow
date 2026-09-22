@@ -3,6 +3,7 @@ import { SQLNode, ValidationResult, FlowPipeline } from '../types';
 import { HanaCodeEditor } from './HanaCodeEditor';
 import { TableDependencyGraphScreen } from './TableDependencyGraphScreen';
 import { validateHanaSql, formatHanaSql } from '../utils/hanaSqlValidator';
+import { autoUppercaseSqlKeywords } from '../utils/sqlKeywordFormatter';
 import {
   CheckCircle2,
   AlertCircle,
@@ -56,6 +57,9 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
 
   // Full size Table Dependency Graph screen state
   const [showTableGraph, setShowTableGraph] = useState<boolean>(false);
+
+  // Auto-uppercase SQL keywords mode (active by default as requested)
+  const [autoUppercase, setAutoUppercase] = useState<boolean>(true);
 
   // Baseline reference for detecting dirty/unsaved state
   const savedSqlRef = useRef<string>(startingSql);
@@ -127,30 +131,6 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
     }
   }, [initialSql]);
 
-  // Save handler
-  const handleSave = useCallback(() => {
-    savedSqlRef.current = sqlContent;
-    onSaveSql?.(sqlContent);
-
-    if (node && onSaveNode) {
-      const res = validateHanaSql(sqlContent);
-      onSaveNode({
-        ...node,
-        sqlContent,
-        validationSummary: {
-          isValid: res.isValid,
-          errors: res.errorCount,
-          warnings: res.warningCount,
-        },
-      });
-    }
-
-    setSaveSuccess(true);
-    setTimeout(() => {
-      setSaveSuccess(false);
-    }, 2000);
-  }, [sqlContent, onSaveSql, node, onSaveNode]);
-
   // SQL Change handler
   const handleSqlChange = useCallback(
     (newSql: string, pushHistory = true) => {
@@ -175,6 +155,34 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
     },
     [updateUndoRedoState]
   );
+
+  // Save handler
+  const handleSave = useCallback(() => {
+    const finalSql = autoUppercase ? autoUppercaseSqlKeywords(sqlContent) : sqlContent;
+    if (finalSql !== sqlContent) {
+      handleSqlChange(finalSql);
+    }
+    savedSqlRef.current = finalSql;
+    onSaveSql?.(finalSql);
+
+    if (node && onSaveNode) {
+      const res = validateHanaSql(finalSql);
+      onSaveNode({
+        ...node,
+        sqlContent: finalSql,
+        validationSummary: {
+          isValid: res.isValid,
+          errors: res.errorCount,
+          warnings: res.warningCount,
+        },
+      });
+    }
+
+    setSaveSuccess(true);
+    setTimeout(() => {
+      setSaveSuccess(false);
+    }, 2000);
+  }, [sqlContent, autoUppercase, handleSqlChange, onSaveSql, node, onSaveNode]);
 
   // Undo Action
   const handleUndo = useCallback(() => {
@@ -508,6 +516,38 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
 
           <div className="h-4 w-px bg-slate-200 mx-1" />
 
+          {/* Auto UPPERCASE Keywords Toggle */}
+          <button
+            type="button"
+            id="auto-uppercase-toggle-btn"
+            onClick={() => {
+              const nextVal = !autoUppercase;
+              setAutoUppercase(nextVal);
+              if (nextVal) {
+                const uppercased = autoUppercaseSqlKeywords(sqlContent);
+                if (uppercased !== sqlContent) {
+                  handleSqlChange(uppercased);
+                }
+              }
+            }}
+            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-md text-xs font-semibold transition-all border cursor-pointer ${
+              autoUppercase
+                ? 'bg-[#fdf0f6] text-[#e20074] border-[#f8b4d9] shadow-2xs'
+                : 'bg-white hover:bg-slate-50 text-slate-600 border-slate-200'
+            }`}
+            title={
+              autoUppercase
+                ? 'Auto UPPERCASE is ON: Lowercase SQL keywords are automatically converted to UPPERCASE as you type. Click to turn off.'
+                : 'Auto UPPERCASE is OFF. Click to automatically convert SQL keywords to UPPERCASE.'
+            }
+          >
+            <span className="font-mono text-[11px] font-bold">A→A</span>
+            <span className="hidden sm:inline">Auto UPPERCASE</span>
+            {autoUppercase ? (
+              <span className="w-1.5 h-1.5 rounded-full bg-[#e20074]" />
+            ) : null}
+          </button>
+
           {/* Table Dependency Graph Button */}
           <button
             type="button"
@@ -571,6 +611,7 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
             onChange={(newVal) => handleSqlChange(newVal, true)}
             diagnostics={validation.diagnostics}
             placeholder="-- Enter or paste your SAP HANA SQL statement here..."
+            autoUppercaseKeywords={autoUppercase}
             onCursorChange={handleCursorChange}
             onUndo={handleUndo}
             onRedo={handleRedo}
@@ -787,6 +828,27 @@ export const FullSizeSqlEditor: React.FC<FullSizeSqlEditorProps> = ({
         </div>
 
         <div className="flex items-center gap-4">
+          <button
+            type="button"
+            onClick={() => {
+              const nextVal = !autoUppercase;
+              setAutoUppercase(nextVal);
+              if (nextVal) {
+                const uppercased = autoUppercaseSqlKeywords(sqlContent);
+                if (uppercased !== sqlContent) {
+                  handleSqlChange(uppercased);
+                }
+              }
+            }}
+            className={`hidden sm:inline-flex items-center gap-1.5 cursor-pointer hover:underline ${
+              autoUppercase ? 'text-[#e20074] font-medium' : 'text-slate-400'
+            }`}
+            title="Toggle automatic conversion of SQL keywords to UPPERCASE"
+          >
+            <span className="font-mono text-[10px] font-bold">A→A</span>
+            <span>Keywords: {autoUppercase ? 'UPPERCASE' : 'Original'}</span>
+          </button>
+          <div className="h-3 w-px bg-slate-200 hidden sm:block" />
           <span className="hidden sm:inline-flex items-center gap-1.5 text-slate-500">
             {fitToWidth ? (
               <span className="text-[#e20074] font-medium flex items-center gap-1">
