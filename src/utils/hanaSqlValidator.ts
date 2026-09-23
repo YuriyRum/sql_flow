@@ -1,56 +1,122 @@
 import { SyntaxDiagnostic, ValidationResult, QueryParameter } from '../types';
 
-// SAP HANA standard and reserved keywords
+// SAP HANA standard and reserved keywords (from official SAP HANA SQL Reference)
 export const HANA_KEYWORDS = new Set([
+  // Query & Projection
   'SELECT', 'FROM', 'WHERE', 'GROUP', 'BY', 'HAVING', 'ORDER', 'LIMIT', 'OFFSET', 'TOP',
-  'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'CROSS', 'NATURAL', 'ON', 'AS', 'AND', 'OR', 'NOT',
-  'IN', 'EXISTS', 'BETWEEN', 'LIKE', 'ILIKE', 'IS', 'NULL', 'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
-  'UNION', 'ALL', 'DISTINCT', 'INTERSECT', 'MINUS', 'EXCEPT', 'TRUE', 'FALSE',
-  'INSERT', 'INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE', 'UPSERT', 'WITH', 'PRIMARY', 'KEY',
-  'MERGE', 'USING', 'MATCHED',
-  'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'TABLE', 'COLUMN', 'ROW', 'VIEW', 'GLOBAL', 'TEMPORARY',
-  'INDEX', 'SEQUENCE', 'SYNONYM', 'SCHEMA', 'PROCEDURE', 'FUNCTION',
-  'DO', 'BEGIN', 'DECLARE', 'DEFAULT', 'CALL', 'RETURN', 'IF', 'ELSEIF', 'WHILE', 'FOR', 'LOOP',
-  'OVER', 'PARTITION', 'ROWS', 'RANGE', 'UNBOUNDED', 'PRECEDING', 'FOLLOWING', 'CURRENT', 'ROW',
+  'JOIN', 'INNER', 'LEFT', 'RIGHT', 'FULL', 'OUTER', 'CROSS', 'NATURAL', 'ON', 'USING',
+  'AS', 'AND', 'OR', 'NOT', 'IN', 'EXISTS', 'BETWEEN', 'LIKE', 'ILIKE', 'IS', 'NULL',
+  'CASE', 'WHEN', 'THEN', 'ELSE', 'END',
+  'UNION', 'ALL', 'DISTINCT', 'INTERSECT', 'MINUS', 'EXCEPT',
+  'TRUE', 'FALSE', 'UNKNOWN',
+  'QUALIFY', 'WINDOW',
+  'GROUPING', 'SETS', 'CUBE', 'ROLLUP', 'TOTALS',
+  'ESCAPE', 'ANY', 'SOME', 'CONTAINS', 'MEMBER', 'OF', 'FUZZY', 'EXACT', 'WEIGHT', 'SCORE', 'SIMILARITY',
+  'LIKE_REGEXPR', 'COLLATE',
+  'WITH', 'RECURSIVE', 'HINT',
+  'STRUCTURED', 'RESULT', 'UNNEST', 'LATERAL', 'APPLY',
+  'SAMPLE', 'BERNOULLI', 'SYSTEM',
+  'FOR', 'UPDATE', 'NOWAIT', 'WAIT',
+  'RETURNING', 'DUMMY',
+
+  // DML Statements
+  'INSERT', 'INTO', 'VALUES', 'UPDATE', 'SET', 'DELETE', 'UPSERT', 'PRIMARY', 'KEY',
+  'MERGE', 'MATCHED', 'SOURCE', 'TARGET',
+
+  // DDL & Object Management
+  'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'RENAME', 'REPLACE',
+  'TABLE', 'COLUMN', 'ROW', 'VIEW', 'GLOBAL', 'TEMPORARY', 'LOCAL', 'PERSISTENT',
+  'INDEX', 'SEQUENCE', 'SYNONYM', 'SCHEMA', 'PROCEDURE', 'FUNCTION', 'TRIGGER', 'PACKAGE', 'LIBRARY', 'TYPE',
+  'UNIQUE', 'CONSTRAINT', 'FOREIGN', 'REFERENCES', 'CHECK', 'CASCADE', 'RESTRICT',
+  'INCREMENT', 'START', 'RESET', 'RESTART', 'MINVALUE', 'MAXVALUE', 'CYCLE', 'NOCYCLE', 'CACHE', 'NOCACHE',
+  'SERIES', 'EQUIDISTANT',
+  'COMMENT', 'ENABLE', 'DISABLE', 'VALIDATE', 'STATISTICS',
+  'PARTITION', 'HASH', 'ROUNDROBIN', 'LOGGING', 'PRESERVE',
+
+  // DCL & Session Control
+  'GRANT', 'REVOKE', 'ADMIN', 'OPTION', 'TO',
+  'COMMIT', 'ROLLBACK', 'AUTOCOMMIT',
+  'EXPLAIN', 'PLAN',
+  'LOCK', 'EXCLUSIVE', 'SHARE', 'MODE',
+  'SESSION', 'USER', 'ROLE',
+
+  // SQLScript & Procedural
+  'DO', 'BEGIN', 'DECLARE', 'DEFAULT', 'CALL', 'RETURN', 'RETURNS', 'IF', 'ELSEIF', 'WHILE', 'LOOP',
+
+  // Windowing & Analytics
+  'OVER', 'ROWS', 'RANGE', 'UNBOUNDED', 'PRECEDING', 'FOLLOWING', 'CURRENT',
   'ASC', 'DESC', 'NULLS', 'FIRST', 'LAST',
+
+  // HANA Specific Memory & Engine
   'LOAD', 'UNLOAD', 'DELTA', 'RECORD', 'LOG'
 ]);
 
 export const HANA_DATA_TYPES = new Set([
-  'NVARCHAR', 'VARCHAR', 'CHAR', 'NCHAR', 'ALPHANUM', 'SHORTTEXT',
+  // Character String
+  'NVARCHAR', 'VARCHAR', 'CHAR', 'NCHAR', 'SHORTTEXT', 'ALPHANUM',
+  // Numeric
   'DECIMAL', 'DEC', 'NUMERIC', 'TINYINT', 'SMALLINT', 'INTEGER', 'INT', 'BIGINT', 'SMALLDECIMAL',
-  'REAL', 'FLOAT', 'DOUBLE',
-  'DATE', 'TIME', 'SECONDDATE', 'TIMESTAMP',
+  'REAL', 'FLOAT', 'DOUBLE', 'DECFLOAT',
+  // Datetime
+  'DATE', 'TIME', 'SECONDDATE', 'TIMESTAMP', 'LONGDATE', 'SECONDTIME', 'DAYDATE',
+  // Boolean
   'BOOLEAN',
+  // LOB & Text
   'CLOB', 'NCLOB', 'BLOB', 'TEXT', 'BINTERVAL',
-  'VARBINARY', 'ST_GEOMETRY', 'ST_POINT'
+  // Binary
+  'BINARY', 'VARBINARY',
+  // Spatial
+  'ST_GEOMETRY', 'ST_POINT', 'ST_LINESTRING', 'ST_POLYGON', 'ST_MULTIPOINT', 'ST_MULTILINESTRING', 'ST_MULTIPOLYGON', 'ST_CIRCULARSTRING',
+  // Vector & Multi-valued
+  'REAL_VECTOR', 'ARRAY',
+  // JSON
+  'JSON'
 ]);
 
 export const HANA_BUILTIN_FUNCTIONS = new Set([
   // Type conversion
-  'TO_NVARCHAR', 'TO_VARCHAR', 'TO_CHAR', 'TO_DECIMAL', 'TO_INTEGER', 'TO_BIGINT',
+  'TO_NVARCHAR', 'TO_VARCHAR', 'TO_CHAR', 'TO_NCHAR', 'TO_ALPHANUM',
+  'TO_DECIMAL', 'TO_INTEGER', 'TO_INT', 'TO_BIGINT', 'TO_SMALLINT', 'TO_TINYINT',
   'TO_REAL', 'TO_DOUBLE', 'TO_DATE', 'TO_TIME', 'TO_SECONDDATE', 'TO_TIMESTAMP', 'TO_BOOLEAN',
+  'TO_BLOB', 'TO_CLOB', 'TO_NCLOB', 'TO_BINARY', 'TO_VARBINARY',
   'CAST', 'CONVERT',
   // String functions
-  'CONCAT', 'SUBSTRING', 'LEFT', 'RIGHT', 'LENGTH', 'LOWER', 'UPPER', 'TRIM', 'LTRIM', 'RTRIM',
-  'LPAD', 'RPAD', 'REPLACE', 'LOCATE', 'INSTR', 'SOUNDEX', 'NCHAR', 'UNICODE',
+  'CONCAT', 'CONCAT_NA', 'SUBSTRING', 'SUBSTR', 'LEFT', 'RIGHT', 'LENGTH', 'CHARLEN',
+  'LOWER', 'UPPER', 'LCASE', 'UCASE', 'TRIM', 'LTRIM', 'RTRIM',
+  'LPAD', 'RPAD', 'REPLACE', 'LOCATE', 'INSTR', 'SOUNDEX', 'NCHAR', 'UNICODE', 'ASCII', 'CHR',
+  'LIKE_REGEXPR', 'OCCURRENCES_REGEXPR', 'SUBSTR_REGEXPR', 'REPLACE_REGEXPR',
+  'INITCAP', 'REPEAT', 'REVERSE', 'BINTOSTR', 'STRTOBIN', 'CLEANSING', 'NORMALIZE',
   // Math functions
-  'ABS', 'CEIL', 'FLOOR', 'ROUND', 'TRUNC', 'MOD', 'POWER', 'SQRT', 'EXP', 'LN', 'LOG', 'SIGN',
-  'GREATEST', 'LEAST',
+  'ABS', 'CEIL', 'CEILING', 'FLOOR', 'ROUND', 'TRUNC', 'MOD', 'POWER', 'SQRT', 'EXP', 'LN', 'LOG', 'SIGN',
+  'GREATEST', 'LEAST', 'SIN', 'COS', 'TAN', 'ASIN', 'ACOS', 'ATAN', 'ATAN2', 'COSH', 'SINH', 'TANH',
+  'BITAND', 'BITOR', 'BITXOR', 'BITNOT', 'BITSET', 'BITUNSET', 'RAND', 'RAND_SECURE',
   // Date & Time
   'CURRENT_DATE', 'CURRENT_TIME', 'CURRENT_TIMESTAMP', 'CURRENT_UTCDATE', 'CURRENT_UTCTIME',
-  'CURRENT_UTCTIMESTAMP', 'NOW', 'ADD_DAYS', 'ADD_MONTHS', 'ADD_YEARS', 'ADD_SECONDS',
-  'DAYS_BETWEEN', 'MONTHS_BETWEEN', 'YEARS_BETWEEN', 'SECONDS_BETWEEN',
+  'CURRENT_UTCTIMESTAMP', 'NOW', 'UTCNOW', 'CLOCK_TIMESTAMP',
+  'ADD_DAYS', 'ADD_MONTHS', 'ADD_YEARS', 'ADD_SECONDS', 'ADD_WORKDAYS', 'WORKDAYS_BETWEEN',
+  'DAYS_BETWEEN', 'MONTHS_BETWEEN', 'YEARS_BETWEEN', 'SECONDS_BETWEEN', 'NANO100_BETWEEN',
   'EXTRACT', 'WEEKDAY', 'QUARTER', 'ISOWEEK', 'LAST_DAY', 'NEXT_DAY',
+  'YEAR', 'MONTH', 'DAY', 'HOUR', 'MINUTE', 'SECOND',
+  'DAYNAME', 'MONTHNAME', 'DAYOFMONTH', 'DAYOFYEAR',
+  'LOCALTOUTC', 'UTCTOLOCAL',
   // Conditional & Null
   'IFNULL', 'COALESCE', 'NULLIF', 'MAP', 'CASE',
   // Aggregate & Window
-  'COUNT', 'SUM', 'AVG', 'MIN', 'MAX', 'STDDEV', 'VAR', 'MEDIAN',
+  'COUNT', 'COUNT_BIG', 'SUM', 'AVG', 'MIN', 'MAX', 'STDDEV', 'VAR', 'MEDIAN',
+  'STDDEV_POP', 'STDDEV_SAMP', 'VAR_POP', 'VAR_SAMP', 'CORR', 'CORR_SPEARMAN',
   'ROW_NUMBER', 'RANK', 'DENSE_RANK', 'PERCENT_RANK', 'CUME_DIST', 'NTILE',
   'LAG', 'LEAD', 'FIRST_VALUE', 'LAST_VALUE', 'NTH_VALUE',
-  // HANA Specific
-  'ARRAY_AGG', 'SERIES_GENERATE', 'SERIES_GENERATE_TIMESTAMP', 'JSON_VALUE', 'JSON_QUERY',
-  'BINTOHEX', 'HEXTOBIN', 'HASH_SHA256', 'RECORD_COUNT'
+  'STRING_AGG', 'LISTAGG', 'ARRAY_AGG',
+  // Hierarchy
+  'HIERARCHY', 'HIERARCHY_ANCESTORS', 'HIERARCHY_DESCENDANTS', 'HIERARCHY_SIBLINGS', 'HIERARCHY_LEVELED', 'HIERARCHY_COMPOSITE',
+  // JSON, Text & Series
+  'JSON_VALUE', 'JSON_QUERY', 'JSON_TABLE', 'JSON_OBJECT', 'JSON_ARRAY',
+  'SERIES_GENERATE', 'SERIES_GENERATE_TIMESTAMP', 'SERIES_ROUND', 'SERIES_DISAGGREGATE',
+  'RECORD_COUNT', 'BINTOHEX', 'HEXTOBIN', 'HASH_SHA256', 'HASH_MD5', 'SYSUUID',
+  // System & Session
+  'CURRENT_SCHEMA', 'SESSION_CONTEXT', 'CURRENT_USER', 'SESSION_USER', 'CURRENT_CONNECTION',
+  // Vector functions (SAP HANA Cloud / Vector Engine)
+  'COSINE_SIMILARITY', 'L2DISTANCE', 'VECTOR_NORM'
 ]);
 
 // Token structure for Lexical Analysis
@@ -242,6 +308,19 @@ export function tokenizeHanaSql(sql: string, diagnostics: SyntaxDiagnostic[]): T
           column: colNum,
         });
         col = pEnd;
+        continue;
+      }
+
+      // 7b. Positional Parameter variable (?) - Standard in SAP HANA prepared statements
+      if (char === '?') {
+        tokens.push({
+          type: 'PARAMETER',
+          value: '?',
+          raw: '?',
+          line: lineNum,
+          column: colNum,
+        });
+        col++;
         continue;
       }
 
@@ -813,7 +892,11 @@ function checkStatementGrammar(
 
   // 1. Check if query starts with a valid statement keyword (SELECT, WITH, DO, CREATE, etc.)
   const firstToken = tokens[0];
-  const validStartKeywords = ['SELECT', 'WITH', 'DO', 'CREATE', 'ALTER', 'DROP', 'INSERT', 'UPDATE', 'UPSERT', 'DELETE', 'MERGE', 'CALL', 'DECLARE'];
+  const validStartKeywords = [
+    'SELECT', 'WITH', 'DO', 'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'INSERT',
+    'UPDATE', 'UPSERT', 'DELETE', 'MERGE', 'CALL', 'DECLARE', 'GRANT', 'REVOKE',
+    'SET', 'RENAME', 'COMMIT', 'ROLLBACK', 'EXPLAIN', 'COMMENT', 'LOCK', 'IMPORT', 'EXPORT', 'REFRESH'
+  ];
 
   if (firstToken.type !== 'KEYWORD' || !validStartKeywords.includes(firstToken.value)) {
     diagnostics.push({
@@ -826,7 +909,7 @@ function checkStatementGrammar(
   }
 
   // 2. Track Clause State across the token stream
-  type ClauseType = 'START' | 'WITH' | 'SELECT' | 'FROM' | 'JOIN' | 'ON' | 'WHERE' | 'GROUP_BY' | 'HAVING' | 'ORDER_BY' | 'LIMIT' | 'OFFSET' | 'AFTER_SEMICOLON';
+  type ClauseType = 'START' | 'WITH' | 'SELECT' | 'FROM' | 'JOIN' | 'ON' | 'WHERE' | 'GROUP_BY' | 'HAVING' | 'QUALIFY' | 'WINDOW' | 'ORDER_BY' | 'LIMIT' | 'OFFSET' | 'FOR_UPDATE' | 'AFTER_SEMICOLON';
   let currentClause: ClauseType = 'START';
   let parenDepth = 0;
 
@@ -843,17 +926,20 @@ function checkStatementGrammar(
 
     // Update top-level clause tracking
     if (parenDepth === 0 && t.type === 'KEYWORD') {
-      if (t.value === 'WITH') currentClause = 'WITH';
+      if (t.value === 'WITH' && prev?.value !== 'MERGE') currentClause = 'WITH';
       else if (t.value === 'SELECT') currentClause = 'SELECT';
       else if (t.value === 'FROM') currentClause = 'FROM';
-      else if (t.value === 'JOIN' || (prev?.value === 'LEFT' || prev?.value === 'RIGHT' || prev?.value === 'FULL' || prev?.value === 'INNER' || prev?.value === 'CROSS')) currentClause = 'JOIN';
+      else if (t.value === 'JOIN' || (prev?.value === 'LEFT' || prev?.value === 'RIGHT' || prev?.value === 'FULL' || prev?.value === 'INNER' || prev?.value === 'CROSS' || prev?.value === 'NATURAL')) currentClause = 'JOIN';
       else if (t.value === 'ON') currentClause = 'ON';
       else if (t.value === 'WHERE') currentClause = 'WHERE';
       else if (t.value === 'GROUP' && next?.value === 'BY') currentClause = 'GROUP_BY';
       else if (t.value === 'HAVING') currentClause = 'HAVING';
+      else if (t.value === 'QUALIFY') currentClause = 'QUALIFY';
+      else if (t.value === 'WINDOW') currentClause = 'WINDOW';
       else if (t.value === 'ORDER' && next?.value === 'BY') currentClause = 'ORDER_BY';
       else if (t.value === 'LIMIT') currentClause = 'LIMIT';
       else if (t.value === 'OFFSET') currentClause = 'OFFSET';
+      else if (t.value === 'FOR' && next?.value === 'UPDATE') currentClause = 'FOR_UPDATE';
     }
 
     // Misspelled clause keyword checks
@@ -903,23 +989,23 @@ function checkStatementGrammar(
       }
 
       if (t.value === 'IS') {
-        if (!next || !['NULL', 'NOT', 'TRUE', 'FALSE'].includes(next.value)) {
+        if (!next || !['NULL', 'NOT', 'TRUE', 'FALSE', 'UNKNOWN', 'DISTINCT'].includes(next.value)) {
           diagnostics.push({
             line: t.line,
             column: t.column,
-            message: "Syntax Error: Incomplete 'IS' expression. Expected 'NULL', 'NOT NULL', 'TRUE', or 'FALSE'.",
+            message: "Syntax Error: Incomplete 'IS' expression. Expected 'NULL', 'NOT NULL', 'TRUE', 'FALSE', 'UNKNOWN', or 'DISTINCT FROM'.",
             severity: 'error',
             ruleId: 'HANA_INCOMPLETE_IS',
           });
         }
       }
 
-      if (t.value === 'LIKE') {
+      if (t.value === 'LIKE' || t.value === 'LIKE_REGEXPR') {
         if (!next || (next.type !== 'STRING_LITERAL' && next.type !== 'PARAMETER' && next.type !== 'IDENTIFIER' && next.value !== '(')) {
           diagnostics.push({
             line: t.line,
             column: t.column,
-            message: "Syntax Error: 'LIKE' predicate missing pattern operand.",
+            message: `Syntax Error: '${t.value}' predicate missing pattern operand.`,
             severity: 'error',
             ruleId: 'HANA_LIKE_MISSING_PATTERN',
           });
@@ -1059,7 +1145,7 @@ function checkStatementGrammar(
     // Check for random tokens after terminating semicolon
     if (t.type === 'PUNCTUATION' && t.value === ';') {
       currentClause = 'AFTER_SEMICOLON';
-      if (next && !(next.type === 'KEYWORD' && ['SELECT', 'WITH', 'DO', 'CREATE', 'INSERT', 'UPDATE', 'DELETE'].includes(next.value))) {
+      if (next && !(next.type === 'KEYWORD' && ['SELECT', 'WITH', 'DO', 'CREATE', 'ALTER', 'DROP', 'TRUNCATE', 'INSERT', 'UPDATE', 'UPSERT', 'DELETE', 'MERGE', 'CALL', 'DECLARE', 'GRANT', 'REVOKE', 'SET', 'RENAME', 'COMMIT', 'ROLLBACK', 'EXPLAIN', 'COMMENT'].includes(next.value))) {
         diagnostics.push({
           line: next.line,
           column: next.column,
@@ -1074,16 +1160,16 @@ function checkStatementGrammar(
     if (t.type === 'IDENTIFIER') {
       const isRecognizedTypeOrFunc = HANA_DATA_TYPES.has(t.value.toUpperCase()) || HANA_BUILTIN_FUNCTIONS.has(t.value.toUpperCase());
 
-      // In WHERE, HAVING, ON: An identifier must be part of an expression
-      if ((currentClause === 'WHERE' || currentClause === 'HAVING' || currentClause === 'ON') && parenDepth === 0) {
+      // In WHERE, HAVING, ON, QUALIFY: An identifier must be part of an expression
+      if ((currentClause === 'WHERE' || currentClause === 'HAVING' || currentClause === 'ON' || currentClause === 'QUALIFY') && parenDepth === 0) {
         const isFollowedByComparison = next && (
           next.type === 'OPERATOR' ||
-          (next.type === 'KEYWORD' && ['IS', 'IN', 'BETWEEN', 'LIKE', 'ILIKE', 'NOT', 'AND', 'OR', 'ASC', 'DESC'].includes(next.value)) ||
+          (next.type === 'KEYWORD' && ['IS', 'IN', 'BETWEEN', 'LIKE', 'ILIKE', 'LIKE_REGEXPR', 'NOT', 'AND', 'OR', 'ASC', 'DESC', 'MEMBER', 'ESCAPE', 'COLLATE'].includes(next.value)) ||
           (next.type === 'PUNCTUATION' && [')', ',', ';', '.'].includes(next.value))
         );
         const isPrecededByOperatorOrKeyword = prev && (
           prev.type === 'OPERATOR' ||
-          (prev.type === 'KEYWORD' && ['WHERE', 'HAVING', 'ON', 'AND', 'OR', 'NOT', 'BETWEEN', 'IN', 'LIKE', 'ILIKE', 'IS', 'CASE', 'WHEN', 'THEN', 'ELSE'].includes(prev.value)) ||
+          (prev.type === 'KEYWORD' && ['WHERE', 'HAVING', 'ON', 'QUALIFY', 'AND', 'OR', 'NOT', 'BETWEEN', 'IN', 'LIKE', 'ILIKE', 'LIKE_REGEXPR', 'IS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'OF', 'ESCAPE', 'COLLATE', 'ANY', 'SOME', 'ALL'].includes(prev.value)) ||
           (prev.type === 'PUNCTUATION' && ['(', ',', '.'].includes(prev.value))
         );
 
@@ -1111,9 +1197,10 @@ function checkStatementGrammar(
         }
       }
 
-      // In GROUP BY: Items cannot have aliases, only comma-separated expressions
+      // In GROUP BY: Items cannot have aliases, only comma-separated expressions (or GROUPING SETS, CUBE, ROLLUP)
       if (currentClause === 'GROUP_BY' && parenDepth === 0) {
-        if (prev && (prev.type === 'IDENTIFIER' || prev.type === 'QUOTED_IDENTIFIER' || prev.type === 'NUMBER_LITERAL')) {
+        const isGroupExtension = ['CUBE', 'ROLLUP', 'GROUPING', 'SETS'].includes(t.value.toUpperCase());
+        if (!isGroupExtension && prev && (prev.type === 'IDENTIFIER' || prev.type === 'QUOTED_IDENTIFIER' || prev.type === 'NUMBER_LITERAL')) {
           diagnostics.push({
             line: t.line,
             column: t.column,
@@ -1528,6 +1615,55 @@ function checkClauseOrder(
         ruleId: 'HANA_CLAUSE_ORDER_LIMIT_ORDER',
       });
     }
+
+    // QUALIFY clause checks (SAP HANA window filtering)
+    const qualifyIdx = findTopLevelKeyword(upperTokens, 'QUALIFY', selectIdx);
+    if (qualifyIdx !== -1 && orderIdx !== -1 && qualifyIdx > orderIdx) {
+      const line = findLineForToken(lines, 'QUALIFY');
+      diagnostics.push({
+        line,
+        column: 1,
+        message: "Invalid clause order: 'QUALIFY' must appear before 'ORDER BY'.",
+        severity: 'error',
+        ruleId: 'HANA_CLAUSE_ORDER_QUALIFY_ORDER',
+      });
+    }
+    if (qualifyIdx !== -1 && whereIdx !== -1 && qualifyIdx < whereIdx) {
+      const line = findLineForToken(lines, 'QUALIFY');
+      diagnostics.push({
+        line,
+        column: 1,
+        message: "Invalid clause order: 'QUALIFY' must appear after 'WHERE'.",
+        severity: 'error',
+        ruleId: 'HANA_CLAUSE_ORDER_QUALIFY_WHERE',
+      });
+    }
+
+    // OFFSET before ORDER BY
+    const offsetIdx = findTopLevelKeyword(upperTokens, 'OFFSET', selectIdx);
+    if (offsetIdx !== -1 && orderIdx !== -1 && offsetIdx < orderIdx) {
+      const line = findLineForToken(lines, 'OFFSET');
+      diagnostics.push({
+        line,
+        column: 1,
+        message: "Invalid clause order: 'OFFSET' must appear after 'ORDER BY'.",
+        severity: 'error',
+        ruleId: 'HANA_CLAUSE_ORDER_OFFSET_ORDER',
+      });
+    }
+
+    // FOR UPDATE order
+    const forUpdateIdx = findTopLevelKeywordSequence(upperTokens, ['FOR', 'UPDATE'], selectIdx);
+    if (forUpdateIdx !== -1 && whereIdx !== -1 && forUpdateIdx < whereIdx) {
+      const line = findLineForToken(lines, 'FOR');
+      diagnostics.push({
+        line,
+        column: 1,
+        message: "Invalid clause order: 'FOR UPDATE' must appear at the end of the query.",
+        severity: 'error',
+        ruleId: 'HANA_CLAUSE_ORDER_FOR_UPDATE',
+      });
+    }
   }
 }
 
@@ -1671,7 +1807,7 @@ export function extractTableLineage(sql: string): { inputs: string[]; outputs: s
   let match: RegExpExecArray | null;
   while ((match = fromRegex.exec(sql)) !== null) {
     const table = match[1].trim();
-    if (!['(', 'SELECT', 'LATERAL', 'UNNEST'].includes(table.toUpperCase())) {
+    if (!['(', 'SELECT', 'LATERAL', 'UNNEST', 'DUMMY'].includes(table.toUpperCase())) {
       inputs.add(cleanTableName(table));
     }
   }
@@ -1721,6 +1857,21 @@ export function extractParameters(sql: string): QueryParameter[] {
         type: inferredType,
         defaultValue: defaultVal,
         description: `SAP HANA dynamic parameter variable :${paramName}`,
+      });
+    }
+  }
+
+  // Extract positional parameter (?)
+  let qIdx = 1;
+  const qRegex = /\?/g;
+  while ((match = qRegex.exec(sql)) !== null) {
+    const paramName = `param_${qIdx++}`;
+    if (!paramMap.has(paramName)) {
+      paramMap.set(paramName, {
+        name: `? (#${qIdx - 1})`,
+        type: 'NVARCHAR(100)',
+        defaultValue: "''",
+        description: `SAP HANA positional prepared parameter #${qIdx - 1}`,
       });
     }
   }
