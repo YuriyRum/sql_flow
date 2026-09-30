@@ -614,31 +614,59 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                     className={`graph-node absolute z-10 bg-white rounded-xl border transition-shadow cursor-grab active:cursor-grabbing select-none ${
                       isSelected
                         ? 'border-[#e20074] shadow-xl ring-2 ring-[#e20074]/30'
+                        : node.isSubqueryResult
+                        ? 'border-purple-300 hover:border-purple-400 shadow-md hover:shadow-lg'
                         : 'border-slate-200 hover:border-slate-300 shadow-md hover:shadow-lg'
                     } ${!isMatched ? 'opacity-30' : 'opacity-100'}`}
                   >
                     {/* Node Header */}
-                    <div className="p-3 bg-slate-50/90 border-b border-slate-200 rounded-t-xl flex items-center justify-between">
+                    <div
+                      className={`p-3 border-b rounded-t-xl flex items-center justify-between ${
+                        node.isSubqueryResult
+                          ? 'bg-purple-50/80 border-purple-200'
+                          : 'bg-slate-50/90 border-slate-200'
+                      }`}
+                    >
                       <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
-                        <div className="w-7 h-7 rounded-lg bg-blue-600 text-white flex items-center justify-center shrink-0 shadow-2xs">
-                          <Database className="w-4 h-4" />
+                        <div
+                          className={`w-7 h-7 rounded-lg text-white flex items-center justify-center shrink-0 shadow-2xs ${
+                            node.isSubqueryResult ? 'bg-purple-600' : 'bg-blue-600'
+                          }`}
+                        >
+                          {node.isSubqueryResult ? (
+                            <Workflow className="w-4 h-4" />
+                          ) : (
+                            <Database className="w-4 h-4" />
+                          )}
                         </div>
                         <div className="min-w-0 flex-1">
-                          <div className="text-[10px] uppercase tracking-wider font-semibold text-slate-500">
-                            Table Name
+                          <div
+                            className={`text-[10px] uppercase tracking-wider font-semibold ${
+                              node.isSubqueryResult ? 'text-purple-700' : 'text-slate-500'
+                            }`}
+                          >
+                            {node.isSubqueryResult ? 'Derived Subquery' : 'Table Name'}
                           </div>
                           <div className="flex items-center gap-1.5 flex-wrap">
                             <span className="font-bold text-xs text-slate-900 truncate font-mono" title={node.tableName}>
                               {node.tableName}
                             </span>
                             {node.alias && (
-                              <span className="px-1.5 py-0.2 bg-blue-100 text-blue-800 rounded text-[10px] font-mono font-bold border border-blue-200">
+                              <span
+                                className={`px-1.5 py-0.2 rounded text-[10px] font-mono font-bold border ${
+                                  node.isSubqueryResult
+                                    ? 'bg-purple-100 text-purple-800 border-purple-300'
+                                    : 'bg-blue-100 text-blue-800 border-blue-200'
+                                }`}
+                              >
                                 AS {node.alias}
                               </span>
                             )}
                           </div>
                           <div className="text-[10px] text-slate-500 font-mono truncate mt-0.5">
-                            {node.schemaName ? (
+                            {node.isSubqueryResult ? (
+                              <span className="text-purple-700 font-medium">{node.fullTableName}</span>
+                            ) : node.schemaName ? (
                               <span>Schema: <strong className="text-slate-700">{node.schemaName}</strong></span>
                             ) : (
                               <span className="text-slate-400 italic">(No schema)</span>
@@ -646,10 +674,10 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                           </div>
                           {node.branchName && (
                             <div className={`text-[10px] font-semibold flex items-center gap-1 mt-0.5 ${
-                              node.branchName.includes('Subquery') ? 'text-purple-700 font-mono' : 'text-[#e20074]'
+                              node.branchName.includes('Subquery') || node.isSubqueryResult ? 'text-purple-700 font-mono' : 'text-[#e20074]'
                             }`}>
                               <span className={`w-1.5 h-1.5 rounded-full ${
-                                node.branchName.includes('Subquery') ? 'bg-purple-600' : 'bg-[#e20074]'
+                                node.branchName.includes('Subquery') || node.isSubqueryResult ? 'bg-purple-600' : 'bg-[#e20074]'
                               }`} />
                               <span>{node.branchName}</span>
                             </div>
@@ -660,7 +688,9 @@ export const TableDependencyGraphScreen: React.FC<TableDependencyGraphScreenProp
                       {/* Join Type Badge */}
                       <span
                         className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded-full border shrink-0 ${
-                          node.joinType === 'FROM'
+                          node.isSubqueryResult
+                            ? 'bg-purple-100 text-purple-800 border-purple-300'
+                            : node.joinType === 'FROM'
                             ? 'bg-blue-50 text-blue-700 border-blue-200'
                             : node.joinType.includes('LEFT')
                             ? 'bg-indigo-50 text-indigo-700 border-indigo-200'

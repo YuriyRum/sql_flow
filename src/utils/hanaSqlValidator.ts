@@ -629,9 +629,23 @@ function checkSelectProjections(
       const selectToken = tokens[i];
       i++;
 
-      // Skip DISTINCT or ALL if present
-      if (i < tokens.length && tokens[i].type === 'KEYWORD' && ['DISTINCT', 'ALL'].includes(tokens[i].value)) {
-        i++;
+      // Skip DISTINCT, ALL, or TOP <n> if present
+      while (
+        i < tokens.length &&
+        tokens[i].type === 'KEYWORD' &&
+        ['DISTINCT', 'ALL', 'TOP'].includes(tokens[i].value)
+      ) {
+        if (tokens[i].value === 'TOP') {
+          i++;
+          if (
+            i < tokens.length &&
+            (tokens[i].type === 'NUMBER_LITERAL' || tokens[i].type === 'PARAMETER')
+          ) {
+            i++;
+          }
+        } else {
+          i++;
+        }
       }
 
       const selectItemsTokens: Token[][] = [];
@@ -641,6 +655,7 @@ function checkSelectProjections(
 
       while (i < tokens.length) {
         const tok = tokens[i];
+        const prevTok = i > 0 ? tokens[i - 1] : null;
 
         if (tok.type === 'PUNCTUATION' && tok.value === '(') {
           parenDepth++;
@@ -650,6 +665,10 @@ function checkSelectProjections(
         }
 
         if (tok.type === 'PUNCTUATION' && tok.value === ')') {
+          if (parenDepth === 0) {
+            // Closing parenthesis of an enclosing subquery or CTE
+            break;
+          }
           parenDepth = Math.max(0, parenDepth - 1);
           currentItem.push(tok);
           i++;
@@ -659,7 +678,25 @@ function checkSelectProjections(
         if (parenDepth === 0) {
           if (
             tok.type === 'KEYWORD' &&
-            ['FROM', 'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'UNION', 'EXCEPT', 'INTERSECT'].includes(tok.value)
+            prevTok?.value !== '.' &&
+            prevTok?.value !== 'AS' &&
+            [
+              'FROM',
+              'WHERE',
+              'GROUP',
+              'HAVING',
+              'ORDER',
+              'LIMIT',
+              'OFFSET',
+              'QUALIFY',
+              'WINDOW',
+              'UNION',
+              'EXCEPT',
+              'INTERSECT',
+              'MINUS',
+              'INTO',
+              'FOR',
+            ].includes(tok.value)
           ) {
             if (tok.value === 'FROM') {
               fromToken = tok;
@@ -731,8 +768,24 @@ function checkSelectProjections(
   }
 }
 
+// Strict grammatical keywords that cannot be used as unquoted column aliases after AS
+const STRICT_NON_ALIAS_KEYWORDS = new Set([
+  'SELECT', 'FROM', 'WHERE', 'JOIN', 'ON', 'AND', 'OR', 'NOT',
+  'UNION', 'INTERSECT', 'EXCEPT', 'MINUS', 'WHEN', 'THEN', 'ELSE'
+]);
+
+function isValidAliasToken(tok: Token): boolean {
+  if (tok.type === 'IDENTIFIER' || tok.type === 'QUOTED_IDENTIFIER') {
+    return true;
+  }
+  if (tok.type === 'KEYWORD' && !STRICT_NON_ALIAS_KEYWORDS.has(tok.value)) {
+    return true;
+  }
+  return false;
+}
+
 function validateSingleProjectionItem(item: Token[], diagnostics: SyntaxDiagnostic[]) {
-  // Check if item contains AS at parenDepth 0
+  // Check if item contains AS at parenDepth 0 (use the last top-level AS if present)
   let asIdx = -1;
   let parenDepth = 0;
   for (let k = 0; k < item.length; k++) {
@@ -740,7 +793,6 @@ function validateSingleProjectionItem(item: Token[], diagnostics: SyntaxDiagnost
     else if (item[k].type === 'PUNCTUATION' && item[k].value === ')') parenDepth = Math.max(0, parenDepth - 1);
     else if (parenDepth === 0 && item[k].type === 'KEYWORD' && item[k].value === 'AS') {
       asIdx = k;
-      break;
     }
   }
 
@@ -767,15 +819,27 @@ function validateSingleProjectionItem(item: Token[], diagnostics: SyntaxDiagnost
         ruleId: 'HANA_MISSING_ALIAS_AFTER_AS',
       });
     } else {
-      // Alias must be a single identifier or quoted identifier
+      // Alias can be an identifier, quoted identifier, or non-reserved SQL keyword (e.g. ROW, KEY, TYPE, VALUE, USER)
       const firstAlias = afterAs[0];
-      if (firstAlias.type !== 'IDENTIFIER' && firstAlias.type !== 'QUOTED_IDENTIFIER') {
+      if (!isValidAliasToken(firstAlias)) {
         diagnostics.push({
           line: firstAlias.line,
           column: firstAlias.column,
           message: `Syntax Error: Invalid alias '${firstAlias.raw}' after 'AS'. Expected an identifier.`,
           severity: 'error',
           ruleId: 'HANA_INVALID_ALIAS_NAME',
+        });
+      } else if (
+        firstAlias.type === 'KEYWORD' ||
+        (firstAlias.type === 'IDENTIFIER' && HANA_DATA_TYPES.has(firstAlias.value.toUpperCase()))
+      ) {
+        diagnostics.push({
+          line: firstAlias.line,
+          column: firstAlias.column,
+          message: `Warning: Alias '${firstAlias.raw}' after 'AS' is a SQL keyword. It can be used, but enclosing it in double quotes ("${firstAlias.raw}") is recommended in SAP HANA.`,
+          severity: 'warning',
+          ruleId: 'HANA_KEYWORD_ALIAS_WARNING',
+          suggestedFix: `"${firstAlias.raw}"`,
         });
       }
 
@@ -791,19 +855,32 @@ function validateSingleProjectionItem(item: Token[], diagnostics: SyntaxDiagnost
         });
       }
     }
-    return;
   }
 
-  // If NO 'AS' keyword in item:
-  // Check for unexpected tokens / missing commas within the item
-  for (let idx = 0; idx < item.length; idx++) {
-    const tok = item[idx];
-    const nextTok = idx < item.length - 1 ? item[idx + 1] : null;
-    const thirdTok = idx < item.length - 2 ? item[idx + 2] : null;
+  const exprTokens = asIdx !== -1 ? item.slice(0, asIdx) : item;
+
+  // Check for unexpected tokens / missing commas within the expression
+  let exprParenDepth = 0;
+  for (let idx = 0; idx < exprTokens.length; idx++) {
+    const tok = exprTokens[idx];
+    if (tok.type === 'PUNCTUATION' && tok.value === '(') {
+      exprParenDepth++;
+      continue;
+    }
+    if (tok.type === 'PUNCTUATION' && tok.value === ')') {
+      exprParenDepth = Math.max(0, exprParenDepth - 1);
+      continue;
+    }
+    if (exprParenDepth > 0) continue;
+
+    const prevTok = idx > 0 ? exprTokens[idx - 1] : null;
+    const nextTok = idx < exprTokens.length - 1 ? exprTokens[idx + 1] : null;
+    const thirdTok = idx < exprTokens.length - 2 ? exprTokens[idx + 2] : null;
 
     // If an identifier is followed by another identifier which is followed by a dot (e.g. `dsdsfsdf v."COL"`)
     if (
       (tok.type === 'IDENTIFIER' || tok.type === 'QUOTED_IDENTIFIER') &&
+      prevTok?.value !== '.' &&
       nextTok &&
       (nextTok.type === 'IDENTIFIER' || nextTok.type === 'QUOTED_IDENTIFIER') &&
       thirdTok &&
@@ -850,19 +927,50 @@ function validateSingleProjectionItem(item: Token[], diagnostics: SyntaxDiagnost
         ruleId: 'HANA_MISSING_COMMA_BEFORE_KEYWORD',
       });
     }
-
-    // Check for random gibberish / invalid identifiers (e.g. `dsdsfsdf`)
   }
 
-  // If item has 3 or more identifiers/literals in a row without operators or dots (e.g. `col1 col2 col3` or `"A" "B" "C"`)
-  const topTokens = item.filter((t) => t.type !== 'PUNCTUATION' || (t.value !== '(' && t.value !== ')'));
-  if (topTokens.length >= 3) {
-    let consecutiveCount = 0;
-    for (let m = 0; m < topTokens.length; m++) {
-      const t = topTokens[m];
-      if (t.type === 'IDENTIFIER' || t.type === 'QUOTED_IDENTIFIER' || t.type === 'NUMBER_LITERAL' || t.type === 'STRING_LITERAL') {
-        consecutiveCount++;
-        if (consecutiveCount >= 3) {
+  // If NO 'AS' keyword in item: check if item has 3 or more unconnected top-level expressions in a row
+  // (e.g. `col1 col2 col3`), while treating dotted chains (`t.col` or `s.t.col`) and function calls `fn(...)` as single units.
+  if (asIdx === -1) {
+    let consecutiveUnits = 0;
+    let depth = 0;
+    for (let m = 0; m < item.length; m++) {
+      const t = item[m];
+      const prev = m > 0 ? item[m - 1] : null;
+
+      if (t.type === 'PUNCTUATION' && t.value === '(') {
+        if (depth === 0) {
+          // If '(' is not preceded by a function identifier (i.e. standalone parenthesized expr), count it as a unit
+          if (!prev || (prev.type !== 'IDENTIFIER' && prev.type !== 'QUOTED_IDENTIFIER' && prev.type !== 'KEYWORD')) {
+            consecutiveUnits++;
+          }
+        }
+        depth++;
+        continue;
+      }
+      if (t.type === 'PUNCTUATION' && t.value === ')') {
+        depth = Math.max(0, depth - 1);
+        continue;
+      }
+      if (depth > 0) continue;
+
+      if (t.type === 'PUNCTUATION' && t.value === '.') {
+        continue;
+      }
+
+      const isValueOrId =
+        t.type === 'IDENTIFIER' ||
+        t.type === 'QUOTED_IDENTIFIER' ||
+        t.type === 'NUMBER_LITERAL' ||
+        t.type === 'STRING_LITERAL';
+
+      if (isValueOrId) {
+        // If preceded by '.', this token is part of a qualified column reference (e.g. `t.col`), not a new consecutive token
+        if (prev && prev.type === 'PUNCTUATION' && prev.value === '.') {
+          continue;
+        }
+        consecutiveUnits++;
+        if (consecutiveUnits >= 3) {
           diagnostics.push({
             line: t.line,
             column: t.column,
@@ -872,8 +980,8 @@ function validateSingleProjectionItem(item: Token[], diagnostics: SyntaxDiagnost
           });
           break;
         }
-      } else if (t.value !== '.') {
-        consecutiveCount = 0;
+      } else {
+        consecutiveUnits = 0;
       }
     }
   }
@@ -912,24 +1020,30 @@ function checkStatementGrammar(
   type ClauseType = 'START' | 'WITH' | 'SELECT' | 'FROM' | 'JOIN' | 'ON' | 'WHERE' | 'GROUP_BY' | 'HAVING' | 'QUALIFY' | 'WINDOW' | 'ORDER_BY' | 'LIMIT' | 'OFFSET' | 'FOR_UPDATE' | 'AFTER_SEMICOLON';
   let currentClause: ClauseType = 'START';
   let parenDepth = 0;
+  let pendingBetweenAnd = false;
 
   // Operator and Expression Syntax Inspection
   for (let i = 0; i < tokens.length; i++) {
     const t = tokens[i];
     const prev = i > 0 ? tokens[i - 1] : null;
     const next = i < tokens.length - 1 ? tokens[i + 1] : null;
+    const isAfterDotOrAs = prev?.value === '.' || prev?.value === 'AS';
 
     if (t.type === 'PUNCTUATION') {
       if (t.value === '(') parenDepth++;
       else if (t.value === ')') parenDepth = Math.max(0, parenDepth - 1);
     }
 
+    if (t.type === 'KEYWORD' && t.value === 'BETWEEN' && !isAfterDotOrAs) {
+      pendingBetweenAnd = true;
+    }
+
     // Update top-level clause tracking
-    if (parenDepth === 0 && t.type === 'KEYWORD') {
+    if (parenDepth === 0 && t.type === 'KEYWORD' && !isAfterDotOrAs) {
       if (t.value === 'WITH' && prev?.value !== 'MERGE') currentClause = 'WITH';
       else if (t.value === 'SELECT') currentClause = 'SELECT';
-      else if (t.value === 'FROM') currentClause = 'FROM';
-      else if (t.value === 'JOIN' || (prev?.value === 'LEFT' || prev?.value === 'RIGHT' || prev?.value === 'FULL' || prev?.value === 'INNER' || prev?.value === 'CROSS' || prev?.value === 'NATURAL')) currentClause = 'JOIN';
+      else if (t.value === 'FROM' && prev?.value !== 'DISTINCT') currentClause = 'FROM';
+      else if (t.value === 'JOIN') currentClause = 'JOIN';
       else if (t.value === 'ON') currentClause = 'ON';
       else if (t.value === 'WHERE') currentClause = 'WHERE';
       else if (t.value === 'GROUP' && next?.value === 'BY') currentClause = 'GROUP_BY';
@@ -942,8 +1056,8 @@ function checkStatementGrammar(
       else if (t.value === 'FOR' && next?.value === 'UPDATE') currentClause = 'FOR_UPDATE';
     }
 
-    // Misspelled clause keyword checks
-    if (t.type === 'KEYWORD') {
+    // Misspelled clause keyword checks (skip when used as column/alias after '.' or 'AS')
+    if (t.type === 'KEYWORD' && !isAfterDotOrAs) {
       if (t.value === 'GROUP' && (!next || next.value !== 'BY')) {
         diagnostics.push({
           line: t.line,
@@ -965,7 +1079,9 @@ function checkStatementGrammar(
       }
 
       if (['LEFT', 'RIGHT', 'FULL', 'INNER', 'CROSS'].includes(t.value)) {
-        if (!next || (next.value !== 'JOIN' && next.value !== 'OUTER')) {
+        // LEFT(str, n) and RIGHT(str, n) are built-in string functions when followed by '('
+        const isStringFuncCall = (t.value === 'LEFT' || t.value === 'RIGHT') && next?.value === '(';
+        if (!isStringFuncCall && (!next || (next.value !== 'JOIN' && next.value !== 'OUTER'))) {
           diagnostics.push({
             line: t.line,
             column: t.column,
@@ -1001,7 +1117,7 @@ function checkStatementGrammar(
       }
 
       if (t.value === 'LIKE' || t.value === 'LIKE_REGEXPR') {
-        if (!next || (next.type !== 'STRING_LITERAL' && next.type !== 'PARAMETER' && next.type !== 'IDENTIFIER' && next.value !== '(')) {
+        if (!next || (next.type !== 'STRING_LITERAL' && next.type !== 'PARAMETER' && next.type !== 'IDENTIFIER' && next.type !== 'QUOTED_IDENTIFIER' && next.value !== '(')) {
           diagnostics.push({
             line: t.line,
             column: t.column,
@@ -1016,7 +1132,7 @@ function checkStatementGrammar(
     // Check for dangling binary operators (=, +, -, *, /, %, <, >, <=, >=, !=, <>, AND, OR, LIKE)
     const binaryOps = ['=', '<', '>', '<=', '>=', '!=', '<>', '||', '+', '-', '*', '/', '%'];
     if (t.type === 'OPERATOR' && binaryOps.includes(t.value)) {
-      // Must have a valid operand before (unless unary + / - or * in COUNT(*) or SELECT *)
+      // Must have a valid operand before (unless unary + / - or * in COUNT(*) or SELECT * or t.*)
       const isWildcardAsterisk = t.value === '*' && (
         (prev?.value === 'SELECT' || (prev?.type === 'PUNCTUATION' && prev.value === ',')) ||
         (prev?.type === 'PUNCTUATION' && prev.value === '(') ||
@@ -1037,9 +1153,9 @@ function checkStatementGrammar(
         }
       }
 
-      // Must have a valid operand after
+      // Must have a valid operand after (unless it is a wildcard asterisk)
       const isAsteriskBeforeFrom = t.value === '*' && next?.value === 'FROM';
-      if (!isAsteriskBeforeFrom) {
+      if (!isWildcardAsterisk && !isAsteriskBeforeFrom) {
         if (!next || (next.type === 'PUNCTUATION' && [')', ',', ';'].includes(next.value)) || (next.type === 'KEYWORD' && ['FROM', 'WHERE', 'GROUP', 'HAVING', 'ORDER', 'LIMIT', 'UNION', 'AND', 'OR'].includes(next.value))) {
           diagnostics.push({
             line: t.line,
@@ -1076,7 +1192,7 @@ function checkStatementGrammar(
     }
 
     // Check for consecutive keywords that make no grammatical sense
-    if (t.type === 'KEYWORD') {
+    if (t.type === 'KEYWORD' && !isAfterDotOrAs) {
       if (t.value === 'SELECT' && next && next.type === 'KEYWORD' && ['FROM', 'WHERE', 'GROUP', 'ORDER'].includes(next.value)) {
         diagnostics.push({
           line: t.line,
@@ -1087,7 +1203,7 @@ function checkStatementGrammar(
         });
       }
 
-      if (t.value === 'FROM' && (!next || (next.type === 'KEYWORD' && ['WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'UNION'].includes(next.value)) || next.value === ';')) {
+      if (t.value === 'FROM' && prev?.value !== 'DISTINCT' && (!next || (next.type === 'KEYWORD' && ['WHERE', 'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'UNION'].includes(next.value)) || next.value === ';')) {
         diagnostics.push({
           line: t.line,
           column: t.column,
@@ -1165,11 +1281,11 @@ function checkStatementGrammar(
         const isFollowedByComparison = next && (
           next.type === 'OPERATOR' ||
           (next.type === 'KEYWORD' && ['IS', 'IN', 'BETWEEN', 'LIKE', 'ILIKE', 'LIKE_REGEXPR', 'NOT', 'AND', 'OR', 'ASC', 'DESC', 'MEMBER', 'ESCAPE', 'COLLATE'].includes(next.value)) ||
-          (next.type === 'PUNCTUATION' && [')', ',', ';', '.'].includes(next.value))
+          (next.type === 'PUNCTUATION' && ['(', ')', ',', ';', '.'].includes(next.value))
         );
         const isPrecededByOperatorOrKeyword = prev && (
           prev.type === 'OPERATOR' ||
-          (prev.type === 'KEYWORD' && ['WHERE', 'HAVING', 'ON', 'QUALIFY', 'AND', 'OR', 'NOT', 'BETWEEN', 'IN', 'LIKE', 'ILIKE', 'LIKE_REGEXPR', 'IS', 'CASE', 'WHEN', 'THEN', 'ELSE', 'OF', 'ESCAPE', 'COLLATE', 'ANY', 'SOME', 'ALL'].includes(prev.value)) ||
+          (prev.type === 'KEYWORD' && ['WHERE', 'HAVING', 'ON', 'QUALIFY', 'AND', 'OR', 'NOT', 'BETWEEN', 'IN', 'LIKE', 'ILIKE', 'LIKE_REGEXPR', 'IS', 'FROM', 'CASE', 'WHEN', 'THEN', 'ELSE', 'OF', 'ESCAPE', 'COLLATE', 'ANY', 'SOME', 'ALL'].includes(prev.value)) ||
           (prev.type === 'PUNCTUATION' && ['(', ',', '.'].includes(prev.value))
         );
 
@@ -1183,9 +1299,12 @@ function checkStatementGrammar(
           });
         }
 
-        // Catch stray identifier after AND/OR without comparison (e.g. `WHERE x = 1 AND y` without `= 2`)
+        // Catch stray identifier after AND/OR without comparison (e.g. `WHERE x = 1 AND y` without `= 2`),
+        // unless AND is the bound separator of a `BETWEEN <expr1> AND <expr2>` predicate
         if (prev && prev.type === 'KEYWORD' && (prev.value === 'AND' || prev.value === 'OR')) {
-          if (!isFollowedByComparison && !isRecognizedTypeOrFunc) {
+          if (prev.value === 'AND' && pendingBetweenAnd) {
+            pendingBetweenAnd = false;
+          } else if (!isFollowedByComparison && !isRecognizedTypeOrFunc) {
             diagnostics.push({
               line: t.line,
               column: t.column,
@@ -1238,6 +1357,9 @@ function checkStatementGrammar(
           });
         }
       }
+    } else if (prev && prev.type === 'KEYWORD' && prev.value === 'AND' && pendingBetweenAnd) {
+      // Clear pending BETWEEN...AND when right bound is a literal, parameter, or keyword
+      pendingBetweenAnd = false;
     }
 
     // Check for two consecutive identifiers / literals that are not connected by AS, comma, or dot
@@ -1271,8 +1393,14 @@ function checkStatementGrammar(
         }
       }
 
-      // If next is a number/string following an identifier without operator (e.g. `col 123` or `col 'abc'`)
-      if (next.type === 'NUMBER_LITERAL' || next.type === 'STRING_LITERAL') {
+      // If next is a number/string following an identifier without operator (e.g. `col 123` or `col 'abc'`),
+      // except ANSI/HANA typed literals (DATE '...', TIME '...', TIMESTAMP '...', N'...', X'...', B'...') and TRIM(LEADING/TRAILING/BOTH '...')
+      const upperT = t.value.toUpperCase();
+      const isTypedLiteralPrefix =
+        next.type === 'STRING_LITERAL' &&
+        ['DATE', 'TIME', 'TIMESTAMP', 'SECONDDATE', 'N', 'X', 'B', 'LEADING', 'TRAILING', 'BOTH'].includes(upperT);
+
+      if ((next.type === 'NUMBER_LITERAL' || next.type === 'STRING_LITERAL') && !isTypedLiteralPrefix) {
         diagnostics.push({
           line: next.line,
           column: next.column,
